@@ -1,6 +1,6 @@
 modules:
   confluence:contentAction:
-    - key: golpo-ai-action
+    - key: golpo-ai-hello-world-content-action
       title: Golpo AI
       resource: main
       resolver:
@@ -26,4 +26,6 @@ app:
 permissions:
   scopes:
     - read:confluence-content.all
+    - read:page:confluence
+    - read:comment:confluence
 

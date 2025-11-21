@@ -11,10 +11,11 @@ const containerStyle = {
   boxShadow: '0 14px 32px rgba(9, 30, 66, 0.16)',
   maxWidth: '760px',
   width: '100%',
-  margin: 0,
+  margin: '0 auto',
   display: 'flex',
   flexDirection: 'column',
-  gap: '24px'
+  gap: '24px',
+  overflow: 'hidden'
 };
 
 const headlineStyle = {
@@ -47,6 +48,42 @@ const pillStyle = {
   border: '1px solid #deb3ff'
 };
 
+const stripMarkup = (content = '') =>
+  content
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const summarizeDocument = (storageValue = '', limit = 400) => stripMarkup(storageValue).slice(0, limit);
+
+const toUiPage = (pageDoc) => {
+  if (!pageDoc) {
+    return null;
+  }
+
+  return {
+    id: pageDoc.id,
+    title: pageDoc.title || 'Current Page',
+    status: pageDoc.status,
+    summary: summarizeDocument(pageDoc.body?.storage?.value || ''),
+    document: pageDoc,
+    version: pageDoc.version?.number,
+    link: pageDoc._links?.webui ? `/wiki${pageDoc._links.webui}` : undefined
+  };
+};
+
+const describeLink = (_links) => {
+  if (_links?.webui) {
+    return `/wiki${_links.webui}`;
+  }
+  if (_links?.tinyui) {
+    return _links.tinyui;
+  }
+  return 'No link available';
+};
+
 function App() {
   const [data, setData] = useState('');
   const [prompt, setPrompt] = useState('');
@@ -54,11 +91,10 @@ function App() {
   const [duration, setDuration] = useState('1 min');
   const [language, setLanguage] = useState('English');
   const [pages, setPages] = useState([]);
-  const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState([]);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchError, setSearchError] = useState('');
+  const [documentPayload, setDocumentPayload] = useState(null);
+  const [footerComments, setFooterComments] = useState([]);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState('');
   const maxChars = 500;
 
   useEffect(() => {
@@ -68,45 +104,69 @@ function App() {
     invoke('getCurrentPage', {})
       .then((pageInfo) => {
         if (pageInfo && pageInfo.id !== 'unknown') {
-          setPages([pageInfo]);
+          setDocumentPayload(pageInfo);
+          const mapped = toUiPage(pageInfo);
+          if (mapped) {
+            setPages([mapped]);
+          }
         }
       })
       .catch((err) => {
         console.error('Error fetching current page:', err);
-        // Fallback: add a placeholder page
         setPages([{ id: 'current', title: 'Current Page', type: 'page' }]);
       });
   }, []);
 
-  const fetchSearchResults = useCallback(
-    async (query) => {
-      setSearchLoading(true);
-      setSearchError('');
-      try {
-        const results = await invoke('searchPages', { query });
-        setSearchResults(results);
-      } catch (error) {
-        console.error('Unable to fetch search results', error);
-        setSearchResults([]);
-        setSearchError('Unable to fetch pages. Please try again.');
-      } finally {
-        setSearchLoading(false);
-      }
-    },
-    []
-  );
-
-  useEffect(() => {
-    if (!isSearchOpen) {
-      return;
+  const resolvePageId = useCallback(async () => {
+    if (documentPayload?.id) {
+      return documentPayload.id;
     }
+    if (pages[0]?.id) {
+      return pages[0].id;
+    }
+    const current = await invoke('getCurrentPage', {});
+    if (current?.id && current.id !== 'unknown') {
+      setDocumentPayload(current);
+      const mapped = toUiPage(current);
+      if (mapped) {
+        setPages([mapped]);
+      }
+      return current.id;
+    }
+    return null;
+  }, [documentPayload, pages]);
 
-    const debounce = setTimeout(() => {
-      fetchSearchResults(searchQuery);
-    }, 300);
+  const handleActionCardClick = useCallback(async () => {
+    setActionLoading(true);
+    setActionError('');
+    try {
+      const targetId = await resolvePageId();
+      if (!targetId) {
+        throw new Error('Missing page id');
+      }
 
-    return () => clearTimeout(debounce);
-  }, [fetchSearchResults, isSearchOpen, searchQuery]);
+      const [pageResponse, footerResponse] = await Promise.all([
+        invoke('getPageById', { pageId: targetId }),
+        invoke('getFooterComments', { pageId: targetId })
+      ]);
+
+      const pageBody = pageResponse?.body;
+      setDocumentPayload(pageBody);
+      const mapped = toUiPage(pageBody);
+      if (mapped) {
+        setPages([mapped]);
+      } else {
+        setPages([]);
+      }
+
+      setFooterComments(footerResponse?.body?.results || []);
+    } catch (error) {
+      console.error('Failed to fetch page document', error);
+      setActionError('Unable to fetch the current Confluence page. Please try again.');
+    } finally {
+      setActionLoading(false);
+    }
+  }, [resolvePageId]);
 
   return (
       <div style={{ ...containerStyle, position: 'relative' }}>
@@ -138,22 +198,18 @@ function App() {
       <div style={headlineStyle}>
         <VideoIcon size={56} />
         <div>
-          <div style={{ fontSize: '18px', fontWeight: 600 }}>Golpo AI</div>
-          <div style={{ color: '#5e6c84', fontSize: '14px' }}>
-            Generate engaging videos from your Confluence data
-          </div>
+          <div style={{ fontSize: '18px', fontWeight: 600 }}>Golpo AI</div>         
         </div>
       </div>
 
       <section>
         <h2 style={{ fontSize: '20px', marginBottom: '8px' }}>How can I help?</h2>
+        <div style={{ color: '#5e6c84', fontSize: '14px' }}>
+            Generate engaging videos from your Confluence data
+          </div>
         <div
           style={cardStyle}
-          onClick={() => {
-            setIsSearchOpen(true);
-            setSearchQuery('');
-            fetchSearchResults('');
-          }}
+          onClick={handleActionCardClick}
           onMouseEnter={(e) => {
             e.currentTarget.style.boxShadow = '0 8px 24px rgba(9, 30, 66, 0.16)';
             e.currentTarget.style.transform = 'translateY(-2px)';
@@ -169,13 +225,18 @@ function App() {
               Create whiteboard explainer video of Confluence pages
             </div>
             <div style={{ fontSize: '13px', color: '#5e6c84' }}>
-              Click to search and add Confluence pages
+              {actionLoading
+                ? 'Fetching the current Confluence page…'
+                : 'Click to fetch the current page as a Golpo AI document'}
             </div>
           </div>
           <span style={pillStyle}>
             <span style={{ fontSize: '10px' }}>Auto</span>
           </span>
         </div>
+        {actionError && (
+          <div style={{ marginTop: '8px', color: '#c9372c', fontSize: '13px' }}>{actionError}</div>
+        )}
       </section>
 
       <section
@@ -258,7 +319,7 @@ function App() {
           </div>
         ) : (
           <div style={{ fontSize: '13px', color: '#6b778c' }}>
-            No pages selected yet. Click the card above to search your Confluence pages.
+            No page captured yet. Click the card above to fetch the current Confluence page.
           </div>
         )}
         <div style={{ fontSize: '14px', color: '#5e6c84' }}>Describe your video</div>
@@ -309,137 +370,6 @@ function App() {
           </button>
         </div>
       </section>
-      {isSearchOpen && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(9, 30, 66, 0.35)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 20,
-            padding: '20px'
-          }}
-        >
-          <div
-            style={{
-              width: '100%',
-              maxWidth: '640px',
-              background: '#fff',
-              borderRadius: '20px',
-              boxShadow: '0 20px 40px rgba(9, 30, 66, 0.25)',
-              padding: '24px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '16px'
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                <VideoIcon size={44} />
-                <div>
-                  <div style={{ fontSize: '18px', fontWeight: 600 }}>Select a Confluence page</div>
-                  <div style={{ color: '#5e6c84', fontSize: '14px' }}>
-                    Search your workspace and pick a page to summarize.
-                  </div>
-                </div>
-              </div>
-              <button
-                onClick={() => setIsSearchOpen(false)}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  fontSize: '22px',
-                  color: '#5e6c84',
-                  cursor: 'pointer'
-                }}
-              >
-                ×
-              </button>
-            </div>
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Search Confluence pages"
-              style={{
-                padding: '12px 14px',
-                borderRadius: '12px',
-                border: '1px solid #dfe1e6',
-                fontSize: '14px'
-              }}
-            />
-            <div
-              style={{
-                maxHeight: '260px',
-                overflowY: 'auto',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '8px'
-              }}
-            >
-              {searchLoading && <div style={{ color: '#6b778c' }}>Searching pages…</div>}
-              {searchError && <div style={{ color: '#c9372c' }}>{searchError}</div>}
-              {!searchLoading && !searchError && searchResults.length === 0 && (
-                <div style={{ color: '#6b778c' }}>No pages found. Try a different search.</div>
-              )}
-              {!searchLoading &&
-                !searchError &&
-                searchResults.map((result) => (
-                  <button
-                    key={result.id}
-                    onClick={async () => {
-                      try {
-                        setSearchLoading(true);
-                        const details = await invoke('getPageDetails', { pageId: result.id });
-                        setPages([details]);
-                        setIsSearchOpen(false);
-                      } catch (error) {
-                        console.error('Failed to load page details', error);
-                        setSearchError('Unable to load page details. Please try again.');
-                      } finally {
-                        setSearchLoading(false);
-                      }
-                    }}
-                    style={{
-                      textAlign: 'left',
-                      border: '1px solid #dfe1e6',
-                      borderRadius: '12px',
-                      padding: '12px',
-                      background: '#fff',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '4px'
-                    }}
-                  >
-                    <span style={{ fontWeight: 600, color: '#172b4d' }}>{result.title}</span>
-                    <span style={{ fontSize: '12px', color: '#6b778c' }}>
-                      {result.spaceName || result.spaceKey || 'Unknown space'}
-                    </span>
-                  </button>
-                ))}
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => setIsSearchOpen(false)}
-                style={{
-                  padding: '10px 18px',
-                  borderRadius: '999px',
-                  border: '1px solid #dfe1e6',
-                  background: '#fff',
-                  cursor: 'pointer',
-                  fontWeight: 600,
-                  color: '#172b4d'
-                }}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       {showSpecs && (
         <div
           style={{
