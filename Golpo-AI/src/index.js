@@ -29,6 +29,7 @@ const requestPageById = async (pageId) => {
   }
 
   const body = await response.json();
+  console.log('[resolver:requestPageById] payload', JSON.stringify(body));
   return { response, body };
 };
 
@@ -40,9 +41,18 @@ resolver.define('getText', (req) => {
 
 // Get current page information from the resolver context plus REST data
 resolver.define('getCurrentPage', async ({ context }) => {
+  console.log('[resolver:getCurrentPage] context:', JSON.stringify({
+    hasExtension: !!context?.extension,
+    extensionType: context?.extension?.type,
+    hasContent: !!context?.extension?.content,
+    contentId: context?.extension?.content?.id,
+    contentTitle: context?.extension?.content?.title
+  }));
+
   const content = context?.extension?.content;
 
   if (!content?.id) {
+    console.warn('[resolver:getCurrentPage] No content ID found in context');
     return {
       id: 'unknown',
       title: 'Current Page',
@@ -54,7 +64,7 @@ resolver.define('getCurrentPage', async ({ context }) => {
     const { body } = await requestPageById(content.id);
     return body;
   } catch (error) {
-    console.error('Failed to fetch default page data', error);
+    console.error('[resolver:getCurrentPage] Failed to fetch default page data', error);
     return {
       id: content.id,
       title: content.title,
@@ -97,10 +107,13 @@ resolver.define('getFooterComments', async ({ payload }) => {
     throw new Error(`Unable to load footer comments for page ${pageId}. Status: ${response.status} ${response.statusText}`);
   }
 
+  const commentBody = await response.json();
+  console.log('[resolver:getFooterComments] payload', JSON.stringify(commentBody));
+
   return {
     status: response.status,
     statusText: response.statusText,
-    body: await response.json()
+    body: commentBody
   };
 });
 
