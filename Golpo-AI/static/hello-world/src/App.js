@@ -749,68 +749,61 @@ const isFailureStatus = (status) => {
     window.open(url, "_blank", "noopener,noreferrer");
   };
 
-  const handlePlayVideo = useCallback((url) => {
-    if (!url) {
-      console.warn("[GolpoAI] No video URL provided for play");
-      return;
-    }
-    try {
-      // Try to play the video in the modal using the ref
-      if (videoElementRef.current) {
-        videoElementRef.current.play().catch(err => {
-          console.warn("[GolpoAI] Could not play video in modal, opening in new tab:", err);
-          openInNewTab(url);
-        });
-      } else {
-        // Fallback to opening in new tab
-        openInNewTab(url);
+  const handlePlayVideo = useCallback(
+    (url) => {
+      const targetUrl = url || videoReadyInfo?.videoUrl;
+      if (!targetUrl) {
+        console.warn("[GolpoAI] No video URL provided for play");
+        setCopyUrlMessage("Video URL not available to play");
+        setTimeout(() => setCopyUrlMessage(""), 4000);
+        return;
       }
-    } catch (error) {
-      console.warn("[GolpoAI] Error playing video, opening in new tab:", error);
-      openInNewTab(url);
-    }
-  }, []);
 
-  const handleDownloadVideo = useCallback((url) => {
+      const element = videoElementRef.current;
+      if (element) {
+        element.currentTime = 0;
+        const playPromise = element.play();
+        if (playPromise?.catch) {
+          playPromise.catch((err) => {
+            console.warn("[GolpoAI] Could not play video in modal, opening in new tab:", err);
+            openInNewTab(targetUrl);
+          });
+        }
+      } else {
+        openInNewTab(targetUrl);
+      }
+    },
+    [videoReadyInfo]
+  );
+
+  const handleDownloadVideo = useCallback(async () => {
+    const url = videoReadyInfo?.downloadUrl || videoReadyInfo?.videoUrl;
     if (!url) {
       console.warn("[GolpoAI] No video URL provided for download");
+      setCopyUrlMessage("Video URL not available to download");
+      setTimeout(() => setCopyUrlMessage(""), 4000);
       return;
     }
+
     try {
-      // First try fetch + blob download (works better with CORS)
-      fetch(url, { mode: 'cors' })
-        .then(response => {
-          if (!response.ok) throw new Error('Network response was not ok');
-          return response.blob();
-        })
-        .then(blob => {
-          const blobUrl = window.URL.createObjectURL(blob);
-          const link = document.createElement("a");
-          link.href = blobUrl;
-          link.download = `golpo-video-${videoReadyInfo?.jobId || Date.now()}.mp4`;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          window.URL.revokeObjectURL(blobUrl);
-          console.log("[GolpoAI] Download initiated via blob for:", url);
-        })
-        .catch(fetchError => {
-          console.warn("[GolpoAI] Blob download failed, trying direct link:", fetchError);
-          // Fallback to direct link download
-          const link = document.createElement("a");
-          link.href = url;
-          link.download = `golpo-video-${videoReadyInfo?.jobId || Date.now()}.mp4`;
-          link.target = "_blank";
-          link.rel = "noopener noreferrer";
-          document.body.appendChild(link);
-          link.click();
-          setTimeout(() => {
-            document.body.removeChild(link);
-          }, 100);
-        });
+      const response = await fetch(url, { mode: "cors" });
+      if (!response.ok) {
+        throw new Error(`Download request failed: ${response.status} ${response.statusText}`);
+      }
+      const blob = await response.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = `golpo-video-${videoReadyInfo?.jobId || Date.now()}.mp4`;
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => {
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(blobUrl);
+      }, 100);
+      console.log("[GolpoAI] Download initiated for:", url);
     } catch (downloadError) {
-      console.warn("[GolpoAI] Unable to download video, opening in new tab:", downloadError);
-      // Final fallback to opening in new tab
+      console.warn("[GolpoAI] Unable to download video via fetch, opening in new tab:", downloadError);
       openInNewTab(url);
     }
   }, [videoReadyInfo]);
@@ -1779,11 +1772,7 @@ const isFailureStatus = (status) => {
                 </button>
                 <button
                   style={styles.videoReadyPrimaryButton}
-                  onClick={() =>
-                    handleDownloadVideo(
-                      videoReadyInfo.downloadUrl || videoReadyInfo.videoUrl
-                    )
-                  }
+                  onClick={handleDownloadVideo}
                 >
                   Download video
                 </button>
