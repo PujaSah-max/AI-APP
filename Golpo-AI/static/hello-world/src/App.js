@@ -503,6 +503,23 @@ const safeInvoke = async (functionName, payload = {}) => {
   }
 };
 
+const base64ToBlob = (base64, contentType = "application/octet-stream") => {
+  const byteCharacters = atob(base64);
+  const byteArrays = [];
+  const sliceSize = 1024;
+
+  for (let offset = 0; offset < byteCharacters.length; offset += sliceSize) {
+    const slice = byteCharacters.slice(offset, offset + sliceSize);
+    const byteNumbers = new Array(slice.length);
+    for (let i = 0; i < slice.length; i += 1) {
+      byteNumbers[i] = slice.charCodeAt(i);
+    }
+    byteArrays.push(new Uint8Array(byteNumbers));
+  }
+
+  return new Blob(byteArrays, { type: contentType });
+};
+
 const QuickActionIcon = () => (
   <span style={styles.actionIconWrapper}>
     <svg width="18" height="18" viewBox="0 0 36 36" fill="none">
@@ -550,18 +567,68 @@ function App() {
   const [videoReadyInfo, setVideoReadyInfo] = useState(null);
   const [showVideoReadyModal, setShowVideoReadyModal] = useState(false);
   const [copyUrlMessage, setCopyUrlMessage] = useState("");
+  const [videoPlayerUrl, setVideoPlayerUrl] = useState(null);
 
   const maxChars = 500;
   const videoStatusTimerRef = useRef(null);
+  const videoObjectUrlRef = useRef(null);
   const videoElementRef = useRef(null);
+  const cleanupVideoObjectUrl = useCallback(() => {
+    if (videoObjectUrlRef.current) {
+      URL.revokeObjectURL(videoObjectUrlRef.current);
+      videoObjectUrlRef.current = null;
+    }
+    setVideoPlayerUrl(null);
+  }, []);
+
+  const prepareVideoSource = useCallback(
+    async (url) => {
+      cleanupVideoObjectUrl();
+      if (!url) {
+        return;
+      }
+
+      // Always use backend resolver for contentAction module to bypass CSP
+      if (!isBylineItem) {
+        try {
+          const backendResponse = await safeInvoke("fetchVideoFile", { videoUrl: url });
+          if (backendResponse?.base64Data) {
+            const blob = base64ToBlob(backendResponse.base64Data, backendResponse.contentType || "video/mp4");
+            const objectUrl = URL.createObjectURL(blob);
+            videoObjectUrlRef.current = objectUrl;
+            setVideoPlayerUrl(objectUrl);
+            console.log("[GolpoAI] prepareVideoSource: Successfully created blob URL from backend fetch");
+            return;
+          } else {
+            console.warn("[GolpoAI] prepareVideoSource: Backend response missing base64Data");
+          }
+        } catch (invokeError) {
+          console.error("[GolpoAI] prepareVideoSource: Backend fetch failed - cannot use direct URL due to CSP:", invokeError);
+          // Don't fall back to direct URL - it will violate CSP
+          // Instead, show error to user or use alternative method
+          setCopyUrlMessage("Unable to load video. Please try downloading or opening in new tab.");
+          setTimeout(() => setCopyUrlMessage(""), 5000);
+          return;
+        }
+      }
+
+      // For bylineItem, we can't use backend resolver, so we can't load video
+      // Just store the URL for copy/download purposes
+      console.warn("[GolpoAI] prepareVideoSource: contentBylineItem module - video playback not available");
+      setVideoPlayerUrl(null);
+    },
+    [cleanupVideoObjectUrl, safeInvoke, isBylineItem]
+  );
+
 
   useEffect(() => {
     return () => {
       if (videoStatusTimerRef.current) {
         clearTimeout(videoStatusTimerRef.current);
       }
+      cleanupVideoObjectUrl();
     };
-  }, []);
+  }, [cleanupVideoObjectUrl]);
 
   const clearVideoStatusTimer = useCallback(() => {
     if (videoStatusTimerRef.current) {
@@ -638,9 +705,10 @@ const isFailureStatus = (status) => {
       };
 
       setVideoReadyInfo(normalizedInfo);
+      prepareVideoSource(videoUrl);
       setShowVideoReadyModal(true);
     },
-    [clearVideoStatusTimer, videoJobId]
+    [clearVideoStatusTimer, videoJobId, prepareVideoSource]
   );
 
   const pollVideoStatus = useCallback(
@@ -746,12 +814,67 @@ const isFailureStatus = (status) => {
     if (!url) {
       return;
     }
-    window.open(url, "_blank", "noopener,noreferrer");
+    
+    // Try window.open first (requires allow-popups sandbox permission)
+    try {
+      const opened = window.open(url, "_blank", "noopener,noreferrer");
+      if (opened) {
+        return; // Successfully opened
+      }
+    } catch (error) {
+      console.log("[GolpoAI] window.open blocked, trying link element fallback:", error);
+    }
+    
+    // Fallback: Create a link element and click it
+    // This works even without popup permissions for downloads/new tabs
+    try {
+      const link = document.createElement("a");
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => {
+        document.body.removeChild(link);
+      }, 100);
+    } catch (fallbackError) {
+      console.error("[GolpoAI] Unable to open URL in new tab:", fallbackError);
+      // Last resort: Copy URL to clipboard and show message
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(url).then(() => {
+          setCopyUrlMessage("URL copied to clipboard. Please paste in a new tab.");
+          setTimeout(() => setCopyUrlMessage(""), 5000);
+        }).catch(() => {
+          setCopyUrlMessage(`Please copy this URL manually: ${url}`);
+          setTimeout(() => setCopyUrlMessage(""), 10000);
+        });
+      } else {
+        setCopyUrlMessage(`Please copy this URL manually: ${url}`);
+        setTimeout(() => setCopyUrlMessage(""), 10000);
+      }
+    }
   };
+
+  const requireContentActionForMedia = useCallback(
+    (actionDescription) => {
+      if (isBylineItem) {
+        setCopyUrlMessage(`Please open the Golpo AI page action to ${actionDescription}.`);
+        setTimeout(() => setCopyUrlMessage(""), 4000);
+        return false;
+      }
+      return true;
+    },
+    [isBylineItem]
+  );
 
   const handlePlayVideo = useCallback(
     (url) => {
-      const targetUrl = url || videoReadyInfo?.videoUrl;
+      if (!requireContentActionForMedia("play the video")) {
+        return;
+      }
+
+      const targetUrl = url || videoPlayerUrl || videoReadyInfo?.videoUrl;
       if (!targetUrl) {
         console.warn("[GolpoAI] No video URL provided for play");
         setCopyUrlMessage("Video URL not available to play");
@@ -773,42 +896,75 @@ const isFailureStatus = (status) => {
         openInNewTab(targetUrl);
       }
     },
-    [videoReadyInfo]
+    [videoReadyInfo, videoPlayerUrl, requireContentActionForMedia]
   );
 
   const handleDownloadVideo = useCallback(async () => {
-    const url = videoReadyInfo?.downloadUrl || videoReadyInfo?.videoUrl;
-    if (!url) {
+    if (!requireContentActionForMedia("download the video")) {
+      return;
+    }
+
+    const remoteUrl = videoReadyInfo?.downloadUrl || videoReadyInfo?.videoUrl;
+    if (!remoteUrl) {
       console.warn("[GolpoAI] No video URL provided for download");
       setCopyUrlMessage("Video URL not available to download");
       setTimeout(() => setCopyUrlMessage(""), 4000);
       return;
     }
 
-    try {
-      const response = await fetch(url, { mode: "cors" });
-      if (!response.ok) {
-        throw new Error(`Download request failed: ${response.status} ${response.statusText}`);
-      }
-      const blob = await response.blob();
-      const blobUrl = window.URL.createObjectURL(blob);
+    const triggerDownload = (blobOrUrl) => {
       const link = document.createElement("a");
-      link.href = blobUrl;
+      link.href = blobOrUrl;
       link.download = `golpo-video-${videoReadyInfo?.jobId || Date.now()}.mp4`;
       document.body.appendChild(link);
       link.click();
       setTimeout(() => {
         document.body.removeChild(link);
-        window.URL.revokeObjectURL(blobUrl);
+        if (blobOrUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(blobOrUrl);
+        }
       }, 100);
-      console.log("[GolpoAI] Download initiated for:", url);
-    } catch (downloadError) {
-      console.warn("[GolpoAI] Unable to download video via fetch, opening in new tab:", downloadError);
-      openInNewTab(url);
+    };
+
+    if (videoPlayerUrl && videoPlayerUrl.startsWith("blob:")) {
+      triggerDownload(videoPlayerUrl);
+      return;
     }
-  }, [videoReadyInfo]);
+
+    try {
+      const backendResponse = await safeInvoke("fetchVideoFile", { videoUrl: remoteUrl });
+      if (backendResponse?.base64Data) {
+        const blob = base64ToBlob(backendResponse.base64Data, backendResponse.contentType || "video/mp4");
+        const blobUrl = URL.createObjectURL(blob);
+        triggerDownload(blobUrl);
+        console.log("[GolpoAI] Download successful via backend fetch");
+        return;
+      } else {
+        console.warn("[GolpoAI] Backend response missing base64Data");
+      }
+    } catch (invokeError) {
+      console.error("[GolpoAI] Backend download fetch failed:", invokeError);
+      // Don't try direct download - it will violate CSP
+      // Instead, open in new tab as fallback
+      setCopyUrlMessage("Download unavailable. Opening video in new tab...");
+      setTimeout(() => {
+        setCopyUrlMessage("");
+        openInNewTab(remoteUrl);
+      }, 2000);
+      return;
+    }
+
+    // If we reach here, backend fetch didn't return expected data
+    console.warn("[GolpoAI] Unable to download via backend, opening in new tab");
+    setCopyUrlMessage("Opening video in new tab for download...");
+    setTimeout(() => {
+      setCopyUrlMessage("");
+      openInNewTab(remoteUrl);
+    }, 1000);
+  }, [videoPlayerUrl, videoReadyInfo, safeInvoke, requireContentActionForMedia]);
 
   const closeVideoReadyModal = () => {
+    cleanupVideoObjectUrl();
     setShowVideoReadyModal(false);
     setVideoReadyInfo(null);
   };
@@ -1465,7 +1621,13 @@ const isFailureStatus = (status) => {
           try {
             await view.close();
           } catch (error) {
-            console.error("[GolpoAI] Error closing view:", error);
+            // Silently handle "not closable" errors - this is expected in some contexts
+            if (error?.message?.includes("not closable") || error?.message?.includes("closable")) {
+              // View is not closable in this context, which is fine
+              return;
+            }
+            // For other errors, log but don't show to user
+            console.log("[GolpoAI] View close not available in this context");
             // Fallback: try to close by hiding the UI
             if (window.parent && window.parent.postMessage) {
               window.parent.postMessage({ type: "close" }, "*");
@@ -1484,8 +1646,8 @@ const isFailureStatus = (status) => {
           <div style={currentStyles.heroContent}>
             <img src={golpoIcon} style={currentStyles.logo} alt="Golpo AI" />
             <h1 style={currentStyles.heroTitle}>{APP_TITLE}</h1>
-          </div>
-        </section>
+        </div>
+      </section>
       </header>
 
       {/* Main Scroll UI */}
@@ -1505,7 +1667,7 @@ const isFailureStatus = (status) => {
               return (
                 <button
                   key={index}
-                  style={{
+        style={{
                     ...currentStyles.actionButton,
                     ...(isActive || isHovered ? currentStyles.actionButtonActive : {}),
                   }}
@@ -1533,38 +1695,38 @@ const isFailureStatus = (status) => {
                 <div key={page.id} style={currentStyles.pageCard}>
                   <h3 style={currentStyles.pageTitle}>{page.title}</h3>
                   <p style={currentStyles.pageSummary}>{page.summary}</p>
-                </div>
-              ))}
-            </div>
+              </div>
+            ))}
+          </div>
           </section>
         )}
 
         {/* Describe your video section */}
         <section style={currentStyles.contextSection}>
           <label style={currentStyles.textareaLabel}>Describe your video</label>
-          <textarea
+        <textarea
             style={currentStyles.textarea}
             placeholder="Describe what should appear in video..."
-            maxLength={maxChars}
+          maxLength={maxChars}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
           />
 
           <div style={currentStyles.textareaFooter}>
             <span>{description.length} / {maxChars}</span>
-            <button
+          <button
               disabled={!description}
               onClick={openModal}
-              style={{
+            style={{
                 ...currentStyles.generateButton,
                 ...(description ? currentStyles.generateButtonActive : currentStyles.generateButtonDisabled),
               }}
             >
               <VideoIcon size={18} />
-              Generate Video
-            </button>
-          </div>
-        </section>
+            Generate Video
+          </button>
+        </div>
+      </section>
 
         {error && <p style={{ color: "red", marginTop: 10 }}>{error}</p>}
                   </div>
@@ -1587,11 +1749,11 @@ const isFailureStatus = (status) => {
                   />
                 </svg>
         </div>
-              <div>
+                <div>
                 <h3 style={styles.modalTitle}>Video Specifications</h3>
                 <p style={styles.modalSubtitle}>Customize your video settings before generation.</p>
-              </div>
-            </div>
+                  </div>
+                </div>
 
             {/* Modal Form */}
             <div style={styles.modalForm}>
@@ -1609,7 +1771,7 @@ const isFailureStatus = (status) => {
                     <option value="3 min">3 min</option>
                     <option value="5 min">5 min</option>
                   </select>
-                </div>
+              </div>
 
                 <div style={styles.formField}>
                   <label style={styles.formLabel}>Voice</label>
@@ -1622,7 +1784,7 @@ const isFailureStatus = (status) => {
                     <option value="Solo Male">Solo Male</option>
                     <option value="Duet">Duet</option>
                 </select>
-                </div>
+            </div>
               </div>
 
               <div style={styles.formField}>
@@ -1641,7 +1803,7 @@ const isFailureStatus = (status) => {
               </div>
 
               <div style={styles.formCheckboxRow}>
-                <input
+            <input
                   type="checkbox"
                   id="includeLogo"
                   checked={includeLogo}
@@ -1668,7 +1830,7 @@ const isFailureStatus = (status) => {
                 <pre style={{ marginTop: 8, fontSize: 12, overflow: "auto" }}>
                   {JSON.stringify(videoGenerationResult, null, 2)}
                 </pre>
-              </div>
+            </div>
             )}
 
             {/* Modal Footer */}
@@ -1676,7 +1838,7 @@ const isFailureStatus = (status) => {
               <button style={styles.modalCancelButton} onClick={() => setIsModalOpen(false)}>
                 Cancel
               </button>
-              <button 
+              <button
                 style={{
                   ...styles.modalGenerateButton,
                   ...((isGeneratingVideo || !golpoAIDocument) ? styles.modalGenerateButtonDisabled : {})
@@ -1690,7 +1852,7 @@ const isFailureStatus = (status) => {
           </div>
         </div>
       )}
-    </div>
+              </div>
 
     {(isGeneratingVideo || isPollingVideoStatus) && (
       <div style={styles.loadingOverlay}>
@@ -1707,7 +1869,7 @@ const isFailureStatus = (status) => {
           <p style={styles.loadingSubtext}>
             This usually takes less than a minute. You can keep this window open.
           </p>
-        </div>
+            </div>
       </div>
     )}
 
@@ -1730,60 +1892,76 @@ const isFailureStatus = (status) => {
               <video
                 ref={videoElementRef}
                 style={styles.videoPreview}
-                src={videoReadyInfo.videoUrl}
+                src={videoPlayerUrl || undefined}
                 controls
                 preload="auto"
                 crossOrigin="anonymous"
                 playsInline
               />
-              {copyUrlMessage && (
-                <div style={{
-                  position: "fixed",
-                  top: "50%",
-                  left: "50%",
-                  transform: "translate(-50%, -50%)",
-                  padding: "16px 24px",
-                  background: "#10b981",
-                  color: "#fff",
-                  borderRadius: "12px",
-                  fontSize: "16px",
-                  textAlign: "center",
-                  fontWeight: 600,
-                  boxShadow: "0 10px 40px rgba(0,0,0,0.3)",
-                  zIndex: 10000,
-                  minWidth: "200px",
-                  animation: "fadeIn 0.3s ease-in",
-                }}>
-                  {copyUrlMessage}
+              {!videoPlayerUrl && videoReadyInfo?.videoUrl && (
+                <div style={{ padding: "20px", textAlign: "center", color: "#666" }}>
+                  <p>Video preview unavailable due to security restrictions.</p>
+                  <p>Use "Play video" or "Download video" buttons below.</p>
                 </div>
               )}
               <div style={styles.videoReadyActions}>
-                <button
+              <button
                   style={styles.videoReadySecondaryButton}
                   onClick={() => handleCopyVideoUrl(videoReadyInfo.videoUrl)}
                 >
                   Copy URL
                 </button>
                 <button
-                  style={styles.videoReadyPrimaryButton}
+                style={{
+                    ...styles.videoReadyPrimaryButton,
+                    ...(isBylineItem ? styles.videoActionDisabled : {})
+                  }}
                   onClick={() => handlePlayVideo(videoReadyInfo.videoUrl)}
+                  disabled={isBylineItem}
+                  title={isBylineItem ? "Open Golpo AI from page actions to play video" : undefined}
                 >
                   Play video
-                </button>
-                <button
-                  style={styles.videoReadyPrimaryButton}
-                  onClick={handleDownloadVideo}
-                >
-                  Download video
-                </button>
-              </div>
+              </button>
+                {!isBylineItem && videoPlayerUrl && videoPlayerUrl.startsWith("blob:") ? (
+                  <a
+                    href={videoPlayerUrl}
+                    download={`golpo-video-${videoReadyInfo?.jobId || Date.now()}.mp4`}
+                    style={{
+                      ...styles.videoReadyPrimaryButton,
+                      textDecoration: "none",
+                      display: "inline-block",
+                      pointerEvents: "auto",
+                    }}
+                    title="Download video"
+                  >
+                    Download video
+                  </a>
+                ) : (
+                  <button
+                style={{
+                      ...styles.videoReadyPrimaryButton,
+                      ...(isBylineItem ? styles.videoActionDisabled : {})
+                    }}
+                    onClick={handleDownloadVideo}
+                    disabled={isBylineItem}
+                    title={isBylineItem ? "Open Golpo AI from page actions to download video" : undefined}
+                  >
+                    Download video
+              </button>
+                )}
+            </div>
+              {copyUrlMessage && (
+                <div style={styles.copyUrlToast}>
+                  {copyUrlMessage}
+        </div>
+              )}
             </>
           ) : (
             <pre style={styles.videoReadyDebug}>
               {JSON.stringify(videoReadyInfo?.raw ?? videoReadyInfo, null, 2)}
             </pre>
-          )}
-        </div>
+      )}
+    </div>
       </div>
     )}
     </>
@@ -2192,6 +2370,17 @@ const styles = {
     flexWrap: "wrap",
     gap: 12,
   },
+  copyUrlToast: {
+    marginTop: 12,
+    background: "#10b981",
+    color: "#fff",
+    padding: "10px 16px",
+    borderRadius: 10,
+    fontWeight: 600,
+    textAlign: "center",
+    width: "100%",
+    boxShadow: "0 6px 20px rgba(16, 185, 129, 0.35)",
+  },
   videoReadyPrimaryButton: {
     flex: 1,
     minWidth: 140,
@@ -2202,6 +2391,11 @@ const styles = {
     color: "#fff",
     fontWeight: 600,
     cursor: "pointer",
+  },
+  videoActionDisabled: {
+    cursor: "not-allowed",
+    opacity: 0.5,
+    pointerEvents: "none",
   },
   videoReadySecondaryButton: {
     flex: 1,

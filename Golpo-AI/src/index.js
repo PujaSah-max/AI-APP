@@ -289,4 +289,87 @@ resolver.define('getVideoStatus', async ({ payload }) => {
   }
 });
 
+// Fetch video file via backend to bypass CSP restrictions
+resolver.define('fetchVideoFile', async ({ payload }) => {
+  const { videoUrl } = payload ?? {};
+
+  if (!videoUrl) {
+    throw new Error('Video url is required to fetch media.');
+  }
+
+  console.log('[resolver:fetchVideoFile] Fetching video from:', videoUrl);
+
+  try {
+    const response = await fetch(videoUrl, {
+      method: 'GET',
+      headers: {
+        'Accept': 'video/mp4,video/*,*/*',
+        'Cache-Control': 'no-cache'
+      }
+    });
+
+    // Check for CORS-related errors
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => 'Unable to read error body');
+      const corsHeaders = {
+        'access-control-allow-origin': response.headers.get('access-control-allow-origin'),
+        'access-control-allow-methods': response.headers.get('access-control-allow-methods'),
+        'access-control-allow-headers': response.headers.get('access-control-allow-headers')
+      };
+      
+      console.error('[resolver:fetchVideoFile] Failed to fetch video', {
+        videoUrl,
+        status: response.status,
+        statusText: response.statusText,
+        errorBody: errorBody.substring(0, 500), // Limit error body length
+        corsHeaders
+      });
+
+      // Provide more specific error message for CORS issues
+      if (response.status === 0 || response.status === 403) {
+        throw new Error(`CORS or access denied. Ensure S3 bucket CORS is configured. Status: ${response.status}`);
+      }
+      
+      throw new Error(`Failed to fetch video content. Status: ${response.status} ${response.statusText}`);
+    }
+
+    // Log CORS headers for debugging
+    const corsHeaders = {
+      'access-control-allow-origin': response.headers.get('access-control-allow-origin'),
+      'access-control-expose-headers': response.headers.get('access-control-expose-headers')
+    };
+    console.log('[resolver:fetchVideoFile] CORS headers received:', corsHeaders);
+
+    const arrayBuffer = await response.arrayBuffer();
+    const base64Data = Buffer.from(arrayBuffer).toString('base64');
+    const contentType = response.headers.get('content-type') || 'video/mp4';
+    const contentLength = response.headers.get('content-length') || arrayBuffer.byteLength;
+
+    console.log('[resolver:fetchVideoFile] Successfully fetched video', {
+      contentType,
+      contentLength,
+      sizeInMB: (contentLength / (1024 * 1024)).toFixed(2)
+    });
+
+    return {
+      base64Data,
+      contentType,
+      contentLength
+    };
+  } catch (error) {
+    console.error('[resolver:fetchVideoFile] Error fetching video file:', {
+      videoUrl,
+      error: error.message,
+      stack: error.stack
+    });
+    
+    // Provide helpful error message for CORS issues
+    if (error.message.includes('CORS') || error.message.includes('Failed to fetch')) {
+      throw new Error(`CORS configuration issue. Please ensure S3 bucket 'golpo-stage-private' has CORS enabled with AllowedOrigin: '*' and AllowedMethod: 'GET'. Original error: ${error.message}`);
+    }
+    
+    throw new Error(`Failed to fetch video file: ${error.message}`);
+  }
+});
+
 export const handler = resolver.getDefinitions();
