@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { invoke, view, requestConfluence, getContext } from "@forge/bridge";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { invoke, view, getContext } from "@forge/bridge";
 import golpoIcon from "./static/golpo-logo.png";
 import VideoIcon from "./components/VideoIcon";
 
@@ -7,6 +7,7 @@ const APP_TITLE = "Golpo AI";
 const APP_TAGLINE = "Generate engaging videos from your Confluence page";
 
 const quickActions = ["Whiteboard explainer video of Confluence page"];
+const VIDEO_STATUS_POLL_INTERVAL = 5000; // ms
 
 // Helper to strip HTML/markup for summaries
 const stripMarkup = (html) => {
@@ -14,6 +15,180 @@ const stripMarkup = (html) => {
   const div = document.createElement("div");
   div.innerHTML = html;
   return div.textContent || div.innerText || "";
+};
+
+// Helper to extract text from ADF (Atlas Document Format)
+const extractTextFromADF = (adf) => {
+  if (!adf) return "";
+  if (typeof adf === "string") {
+    try {
+      const parsed = JSON.parse(adf);
+      return extractTextFromADFNode(parsed);
+    } catch (e) {
+      return adf;
+    }
+  }
+  if (typeof adf === "object") {
+    return extractTextFromADFNode(adf);
+  }
+  return "";
+};
+
+// Helper to recursively extract text from ADF nodes
+const extractTextFromADFNode = (node) => {
+  if (!node) return "";
+  let text = "";
+  
+  if (node.type === "text" && node.text) {
+    text += node.text;
+  }
+  
+  if (node.content && Array.isArray(node.content)) {
+    node.content.forEach((child) => {
+      text += extractTextFromADFNode(child);
+    });
+  }
+  
+  // Add line breaks for paragraphs and headings
+  if (node.type === "paragraph" || node.type === "heading") {
+    text += "\n";
+  }
+  
+  return text;
+};
+
+// Helper to extract body content from page
+const extractPageBodyContent = (pageBody) => {
+  if (!pageBody) return "";
+  
+  // Try storage format first
+  if (pageBody.body?.storage?.value) {
+    return stripMarkup(pageBody.body.storage.value);
+  }
+  
+  // Try atlas_doc_format
+  if (pageBody.body?.atlas_doc_format?.value) {
+    const adfValue = pageBody.body.atlas_doc_format.value;
+    return extractTextFromADF(adfValue);
+  }
+  
+  // Try body directly
+  if (pageBody.body) {
+    if (typeof pageBody.body === "string") {
+      return stripMarkup(pageBody.body);
+    }
+    if (pageBody.body.value) {
+      return extractTextFromADF(pageBody.body.value);
+    }
+  }
+  
+  return "";
+};
+
+// Helper to extract comment body content
+const extractCommentBodyContent = (comment) => {
+  if (!comment || !comment.body) return "";
+  
+  // Try storage format
+  if (comment.body.storage?.value) {
+    return stripMarkup(comment.body.storage.value);
+  }
+  
+  // Try atlas_doc_format
+  if (comment.body.atlas_doc_format?.value) {
+    return extractTextFromADF(comment.body.atlas_doc_format.value);
+  }
+  
+  // Try plain text
+  if (typeof comment.body === "string") {
+    return stripMarkup(comment.body);
+  }
+  
+  return "";
+};
+
+// Helper to extract author name from comment
+const extractCommentAuthor = (comment) => {
+  if (!comment) return "Unknown";
+  
+  // Try various author field paths
+  const authorPaths = [
+    comment.author?.displayName,
+    comment.author?.name,
+    comment.author?.username,
+    comment.author?.publicName,
+    comment.author?.userKey,
+    comment.authorId,
+    comment.creator?.displayName,
+    comment.creator?.name,
+    comment.creator?.username,
+    comment.createdBy?.displayName,
+    comment.createdBy?.name,
+  ];
+  
+  for (const authorName of authorPaths) {
+    if (authorName && typeof authorName === "string" && authorName.trim() !== "") {
+      return authorName.trim();
+    }
+  }
+  
+  return "Unknown";
+};
+
+// Helper to create a document for Golpo AI API
+const createGolpoAIDocument = (pageBody, footerComments) => {
+  const pageTitle = pageBody?.title || "Untitled Page";
+  const pageContent = extractPageBodyContent(pageBody);
+  
+  // Build comments section with detailed information
+  let commentsSection = "";
+  if (footerComments && footerComments.length > 0) {
+    commentsSection = "\n\n--- FOOTER COMMENTS ---\n\n";
+    footerComments.forEach((comment, index) => {
+      const commentText = extractCommentBodyContent(comment);
+      const author = extractCommentAuthor(comment);
+      const date = comment.createdAt ? new Date(comment.createdAt).toLocaleString() : "";
+      
+      commentsSection += `Comment ${index + 1} (by ${author}${date ? ` on ${date}` : ""}):\n`;
+      commentsSection += commentText + "\n\n";
+    });
+  }
+  
+  // Create the document object with enhanced comment information
+  const document = {
+    title: pageTitle,
+    pageId: pageBody?.id || "",
+    content: pageContent,
+    comments: footerComments?.map((comment, index) => {
+      const commentText = extractCommentBodyContent(comment);
+      const author = extractCommentAuthor(comment);
+      
+      return {
+        id: comment.id || `comment-${index}`,
+        author: author,
+        authorId: comment.authorId || comment.author?.accountId || "",
+        authorDetails: {
+          displayName: comment.author?.displayName || author,
+          name: comment.author?.name,
+          username: comment.author?.username,
+          accountId: comment.author?.accountId || comment.authorId,
+        },
+        createdAt: comment.createdAt || "",
+        body: commentText,
+        rawBody: comment.body, // Keep raw body for reference
+      };
+    }) || [],
+    fullText: `TITLE: ${pageTitle}\n\nCONTENT:\n${pageContent}${commentsSection}`,
+    metadata: {
+      pageId: pageBody?.id || "",
+      spaceId: pageBody?.spaceId || "",
+      version: pageBody?.version?.number || 1,
+      createdAt: pageBody?.createdAt || "",
+      commentCount: footerComments?.length || 0,
+    },
+  };
+  
+  return document;
 };
 
 // Helper to convert API page to UI format
@@ -34,8 +209,10 @@ const getPageIdFromUrl = () => {
   try {
     const url = window.location.href;
     const pathname = window.location.pathname;
-    console.log("[GolpoAI] Attempting to extract page ID from URL:", { url, pathname });
+    const search = window.location.search;
+    console.log("[GolpoAI] Attempting to extract page ID from URL:", { url, pathname, search });
 
+    // Try various URL patterns
     let match = url.match(/\/pages\/(\d+)/);
     if (match) {
       console.log("[GolpoAI] Found page ID from URL pattern 1:", match[1]);
@@ -51,11 +228,30 @@ const getPageIdFromUrl = () => {
       console.log("[GolpoAI] Found page ID from URL pattern 3:", match[1]);
       return match[1];
     }
+    match = url.match(/\/wiki\/spaces\/[^\/]+\/pages\/(\d+)/);
+    if (match) {
+      console.log("[GolpoAI] Found page ID from URL pattern 4:", match[1]);
+      return match[1];
+    }
+    
+    // Try pathname
     const pathMatch = pathname.match(/\/pages\/(\d+)/);
     if (pathMatch) {
       console.log("[GolpoAI] Found page ID from pathname:", pathMatch[1]);
       return pathMatch[1];
     }
+    
+    // Try search params
+    if (search) {
+      const searchParams = new URLSearchParams(search);
+      const pageIdParam = searchParams.get("pageId") || searchParams.get("contentId");
+      if (pageIdParam) {
+        console.log("[GolpoAI] Found page ID from search params:", pageIdParam);
+        return pageIdParam;
+      }
+    }
+    
+    // Try hash
     if (window.location.hash) {
       const hashMatch = window.location.hash.match(/pageId=(\d+)/);
       if (hashMatch) {
@@ -64,49 +260,125 @@ const getPageIdFromUrl = () => {
       }
     }
 
-    // Try parent window if in iframe
+    // Try parent window if in iframe (more thorough)
+    // Note: This will fail with cross-origin errors in iframe contexts, which is expected
     try {
       if (window.parent && window.parent !== window) {
-        const parentUrl = window.parent.location.href;
-        const parentPathname = window.parent.location.pathname;
-        console.log("[GolpoAI] Trying parent window URL:", { parentUrl, parentPathname });
+        try {
+          const parentUrl = window.parent.location.href;
+          const parentPathname = window.parent.location.pathname;
+          const parentSearch = window.parent.location.search;
+          console.log("[GolpoAI] Trying parent window URL:", { parentUrl, parentPathname, parentSearch });
 
-        match = parentUrl.match(/\/pages\/(\d+)/);
-        if (match) {
-          console.log("[GolpoAI] Found page ID from parent URL:", match[1]);
-          return match[1];
+          match = parentUrl.match(/\/pages\/(\d+)/);
+          if (match) {
+            console.log("[GolpoAI] Found page ID from parent URL:", match[1]);
+            return match[1];
+          }
+          match = parentPathname.match(/\/pages\/(\d+)/);
+          if (match) {
+            console.log("[GolpoAI] Found page ID from parent pathname:", match[1]);
+            return match[1];
+          }
+          if (parentSearch) {
+            const parentParams = new URLSearchParams(parentSearch);
+            const parentPageId = parentParams.get("pageId") || parentParams.get("contentId");
+            if (parentPageId) {
+              console.log("[GolpoAI] Found page ID from parent search params:", parentPageId);
+              return parentPageId;
+            }
+          }
+        } catch (locationErr) {
+          // Cross-origin error is expected in iframe contexts - silently continue
+          if (locationErr.message && locationErr.message.includes("cross-origin")) {
+            // Expected in iframe contexts, don't log as error
+          } else {
+            console.log("[GolpoAI] Cannot access parent location:", locationErr.message);
+          }
         }
-        match = parentPathname.match(/\/pages\/(\d+)/);
-        if (match) {
-          console.log("[GolpoAI] Found page ID from parent pathname:", match[1]);
-          return match[1];
+        
+        // Try parent document
+        try {
+          const parentDoc = window.parent.document;
+          if (parentDoc) {
+            const parentBody = parentDoc.body;
+            if (parentBody) {
+              const parentDataId = parentBody.getAttribute("data-content-id") || 
+                                   parentBody.getAttribute("data-page-id") ||
+                                   parentBody.getAttribute("data-contentid");
+              if (parentDataId) {
+                console.log("[GolpoAI] Found page ID from parent document body:", parentDataId);
+                return parentDataId;
+              }
+            }
+          }
+        } catch (docErr) {
+          // Cross-origin error is expected in iframe contexts - silently continue
+          if (docErr.message && docErr.message.includes("cross-origin")) {
+            // Expected in iframe contexts, don't log as error
+          } else {
+            console.log("[GolpoAI] Cannot access parent document:", docErr.message);
+          }
         }
       }
     } catch (parentErr) {
-      console.log("[GolpoAI] Cannot access parent window (expected in some contexts):", parentErr.message);
+      // Cross-origin error is expected in iframe contexts - silently continue
+      if (parentErr.message && parentErr.message.includes("cross-origin")) {
+        // Expected in iframe contexts, don't log as error
+      } else {
+        console.log("[GolpoAI] Cannot access parent window:", parentErr.message);
+      }
     }
 
-    // Try meta tags or data attributes
+    // Try meta tags or data attributes (more thorough)
     try {
-      const metaPageId = document.querySelector('meta[name="ajs-content-id"], meta[property="ajs-content-id"]');
-      if (metaPageId) {
-        const pageId = metaPageId.getAttribute("content");
-        if (pageId) {
-          console.log("[GolpoAI] Found page ID from meta tag:", pageId);
-          return pageId;
+      // Try multiple meta tag selectors
+      const metaSelectors = [
+        'meta[name="ajs-content-id"]',
+        'meta[property="ajs-content-id"]',
+        'meta[name="content-id"]',
+        'meta[property="content-id"]',
+        'meta[name="page-id"]',
+        'meta[property="page-id"]'
+      ];
+      
+      for (const selector of metaSelectors) {
+        const metaPageId = document.querySelector(selector);
+        if (metaPageId) {
+          const pageId = metaPageId.getAttribute("content");
+          if (pageId) {
+            console.log("[GolpoAI] Found page ID from meta tag:", pageId);
+            return pageId;
+          }
         }
       }
+      
+      // Try body data attributes
       const body = document.body;
       if (body) {
         const dataPageId =
           body.getAttribute("data-content-id") ||
           body.getAttribute("data-page-id") ||
-          body.getAttribute("data-contentid");
+          body.getAttribute("data-contentid") ||
+          body.getAttribute("data-pageid");
         if (dataPageId) {
           console.log("[GolpoAI] Found page ID from data attribute:", dataPageId);
           return dataPageId;
         }
       }
+      
+      // Try document element
+      const html = document.documentElement;
+      if (html) {
+        const htmlDataId = html.getAttribute("data-content-id") || 
+                          html.getAttribute("data-page-id");
+        if (htmlDataId) {
+          console.log("[GolpoAI] Found page ID from html element:", htmlDataId);
+          return htmlDataId;
+        }
+      }
+      
+      // Try window globals
       if (window.__ATL_PAGE_ID__) {
         console.log("[GolpoAI] Found page ID from __ATL_PAGE_ID__:", window.__ATL_PAGE_ID__);
         return String(window.__ATL_PAGE_ID__);
@@ -114,6 +386,25 @@ const getPageIdFromUrl = () => {
       if (window.AJS && window.AJS.params && window.AJS.params.contentId) {
         console.log("[GolpoAI] Found page ID from AJS.params:", window.AJS.params.contentId);
         return String(window.AJS.params.contentId);
+      }
+      if (window.confluence && window.confluence.contentId) {
+        console.log("[GolpoAI] Found page ID from window.confluence:", window.confluence.contentId);
+        return String(window.confluence.contentId);
+      }
+      
+      // Try to find in script tags or JSON-LD
+      const scripts = document.querySelectorAll('script[type="application/json"]');
+      for (const script of scripts) {
+        try {
+          const data = JSON.parse(script.textContent);
+          if (data.contentId || data.pageId || data.id) {
+            const foundId = data.contentId || data.pageId || data.id;
+            console.log("[GolpoAI] Found page ID from JSON script:", foundId);
+            return String(foundId);
+          }
+        } catch (e) {
+          // Ignore parse errors
+        }
       }
     } catch (metaErr) {
       console.log("[GolpoAI] Could not get page ID from meta/data:", metaErr.message);
@@ -126,6 +417,79 @@ const getPageIdFromUrl = () => {
   return null;
 };
 
+// Helper to extract page ID from context
+const extractPageIdFromContext = (context) => {
+  if (!context) {
+    console.log("[GolpoAI] extractPageIdFromContext: context is null/undefined");
+    return null;
+  }
+  
+  console.log("[GolpoAI] extractPageIdFromContext: Full context object:", JSON.stringify(context, null, 2));
+  
+  // Try various paths in the context object (more comprehensive)
+  const possiblePaths = [
+    context.content?.id,
+    context.extension?.content?.id,
+    context.contentId,
+    context.pageId,
+    context.page?.id,
+    context.id,
+    context.content?.contentId,
+    context.extension?.content?.contentId,
+    context.extension?.contentId,
+    context.content?.pageId,
+    context.extension?.pageId,
+    // Try nested structures
+    context?.extension?.content?.id,
+    context?.content?.id,
+    // Try array access
+    context?.content?.[0]?.id,
+    context?.extension?.content?.[0]?.id,
+  ];
+  
+  for (const pageId of possiblePaths) {
+    if (pageId && pageId !== "unknown" && pageId !== "current" && String(pageId).trim() !== "") {
+      console.log("[GolpoAI] extractPageIdFromContext: Found page ID", pageId);
+      return String(pageId);
+    }
+  }
+  
+  // Try to find ID in nested objects recursively (limited depth)
+  const findIdRecursively = (obj, depth = 0, maxDepth = 3) => {
+    if (depth > maxDepth || !obj || typeof obj !== 'object') return null;
+    
+    // Check common ID field names
+    const idFields = ['id', 'contentId', 'pageId', 'content-id', 'page-id'];
+    for (const field of idFields) {
+      if (obj[field] && obj[field] !== "unknown" && obj[field] !== "current") {
+        const foundId = String(obj[field]).trim();
+        if (foundId) {
+          console.log("[GolpoAI] extractPageIdFromContext: Found page ID recursively", foundId);
+          return foundId;
+        }
+      }
+    }
+    
+    // Recursively search in nested objects
+    for (const key in obj) {
+      if (obj.hasOwnProperty(key) && typeof obj[key] === 'object') {
+        const found = findIdRecursively(obj[key], depth + 1, maxDepth);
+        if (found) return found;
+      }
+    }
+    
+    return null;
+  };
+  
+  const recursiveId = findIdRecursively(context);
+  if (recursiveId) {
+    return recursiveId;
+  }
+  
+  console.warn("[GolpoAI] extractPageIdFromContext: No page ID found in context");
+  return null;
+};
+
 // Helper to safely call invoke with fallback
 const safeInvoke = async (functionName, payload = {}) => {
   try {
@@ -135,56 +499,6 @@ const safeInvoke = async (functionName, payload = {}) => {
       console.log(`[GolpoAI] invoke('${functionName}') not available (likely contentBylineItem), will use fallback`);
       throw new Error("INVOKE_NOT_AVAILABLE");
     }
-    throw error;
-  }
-};
-
-// Helper to fetch page details directly using requestConfluence
-const fetchPageByIdDirect = async (pageId) => {
-  if (!pageId) {
-    throw new Error("Page id is required to load Confluence page details directly.");
-  }
-  try {
-    const response = await requestConfluence(
-      `/wiki/api/v2/pages/${pageId}?fields=id,title,status,createdAt,authorId,spaceId,body,version,_links&body-format=storage`
-    );
-    if (!response.ok) {
-      const errorBody = await response.text();
-      console.error("[GolpoAI] Failed to retrieve Confluence page by id directly", {
-        pageId,
-        status: response.status,
-        statusText: response.statusText,
-        errorBody,
-      });
-      throw new Error(`Unable to load Confluence page ${pageId}. Status: ${response.status} ${response.statusText}`);
-    }
-    return await response.json();
-  } catch (error) {
-    console.error("[GolpoAI] Error fetching page by ID directly:", error);
-    throw error;
-  }
-};
-
-// Helper to fetch footer comments directly using requestConfluence
-const fetchFooterCommentsDirect = async (pageId) => {
-  if (!pageId) {
-    throw new Error("Page id is required to load footer comments directly.");
-  }
-  try {
-    const response = await requestConfluence(`/wiki/api/v2/pages/${pageId}/footer-comments`);
-    if (!response.ok) {
-      const errorBody = await response.text();
-      console.error("[GolpoAI] Failed to retrieve footer comments directly", {
-        pageId,
-        status: response.status,
-        statusText: response.statusText,
-        errorBody,
-      });
-      throw new Error(`Unable to load footer comments for page ${pageId}. Status: ${response.status} ${response.statusText}`);
-    }
-    return await response.json();
-  } catch (error) {
-    console.error("[GolpoAI] Error fetching footer comments directly:", error);
     throw error;
   }
 };
@@ -215,6 +529,8 @@ function App() {
   const [voice, setVoice] = useState("Solo Female");
   const [language, setLanguage] = useState("English");
   const [includeLogo, setIncludeLogo] = useState(false);
+  const [music, setMusic] = useState("engaging");
+  const [style, setStyle] = useState("");
 
   // Detect if we're in contentBylineItem (no resolver available)
   const [isBylineItem, setIsBylineItem] = useState(false);
@@ -225,8 +541,284 @@ function App() {
   const [footerComments, setFooterComments] = useState([]);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState("");
+  const [golpoAIDocument, setGolpoAIDocument] = useState(null);
+  const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
+  const [videoGenerationResult, setVideoGenerationResult] = useState(null);
+  const [isPollingVideoStatus, setIsPollingVideoStatus] = useState(false);
+  const [videoJobId, setVideoJobId] = useState(null);
+  const [videoStatusMessage, setVideoStatusMessage] = useState("");
+  const [videoReadyInfo, setVideoReadyInfo] = useState(null);
+  const [showVideoReadyModal, setShowVideoReadyModal] = useState(false);
+  const [copyUrlMessage, setCopyUrlMessage] = useState("");
 
   const maxChars = 500;
+  const videoStatusTimerRef = useRef(null);
+  const videoElementRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (videoStatusTimerRef.current) {
+        clearTimeout(videoStatusTimerRef.current);
+      }
+    };
+  }, []);
+
+  const clearVideoStatusTimer = useCallback(() => {
+    if (videoStatusTimerRef.current) {
+      clearTimeout(videoStatusTimerRef.current);
+      videoStatusTimerRef.current = null;
+    }
+  }, []);
+
+  const extractJobIdFromResponse = (payload) => {
+    if (!payload) {
+      return null;
+    }
+    return (
+      payload.job_id ||
+      payload.jobId ||
+      payload.id ||
+      payload?.data?.job_id ||
+      payload?.data?.jobId ||
+      payload?.job?.id ||
+      null
+    );
+  };
+
+const extractVideoUrlFromPayload = (payload) => {
+    if (!payload) {
+      return null;
+    }
+    return (
+      payload.video_url ||
+      payload.download_url ||
+    payload.podcast_url ||
+      payload?.data?.video_url ||
+      payload?.data?.download_url ||
+    payload?.data?.podcast_url ||
+      payload?.result?.video_url ||
+      null
+    );
+  };
+
+const normalizeStatus = (status) => (typeof status === "string" ? status.toLowerCase() : "");
+
+const isSuccessStatus = (status) => {
+  const normalized = normalizeStatus(status);
+  if (!normalized) return false;
+  const keywords = ["completed", "ready", "success", "finished", "done", "complete"];
+  return keywords.some((keyword) => normalized.includes(keyword));
+};
+
+const isFailureStatus = (status) => {
+  const normalized = normalizeStatus(status);
+  if (!normalized) return false;
+  const keywords = ["failed", "error", "cancelled", "denied", "rejected"];
+  return keywords.some((keyword) => normalized.includes(keyword));
+};
+
+  const handleVideoReady = useCallback(
+    (statusPayload, jobId = null) => {
+      if (!statusPayload) {
+        return;
+      }
+
+      clearVideoStatusTimer();
+      setIsGeneratingVideo(false);
+      setIsPollingVideoStatus(false);
+      setVideoStatusMessage("");
+
+      const videoUrl = extractVideoUrlFromPayload(statusPayload);
+      const normalizedInfo = {
+        jobId: jobId || extractJobIdFromResponse(statusPayload) || videoJobId,
+        videoUrl,
+        downloadUrl: videoUrl || statusPayload?.download_url,
+        status: statusPayload?.status || statusPayload?.data?.status || "completed",
+        raw: statusPayload
+      };
+
+      setVideoReadyInfo(normalizedInfo);
+      setShowVideoReadyModal(true);
+    },
+    [clearVideoStatusTimer, videoJobId]
+  );
+
+  const pollVideoStatus = useCallback(
+    async (jobId, attempt = 0) => {
+      if (!jobId) {
+        return;
+      }
+
+      setVideoStatusMessage("Generating video...");
+
+      try {
+        const response = await safeInvoke("getVideoStatus", { jobId });
+        const statusPayload = response?.body || response;
+        const status =
+          statusPayload?.status ||
+          statusPayload?.data?.status ||
+          statusPayload?.job_status ||
+          statusPayload?.state ||
+          "";
+
+        console.log("[GolpoAI] pollVideoStatus response:", statusPayload);
+
+        const videoUrlCandidate = extractVideoUrlFromPayload(statusPayload);
+
+        if (isSuccessStatus(status) || videoUrlCandidate) {
+          handleVideoReady(
+            videoUrlCandidate ? { ...statusPayload, video_url: videoUrlCandidate } : statusPayload,
+            jobId
+          );
+          return;
+        }
+
+        if (isFailureStatus(status)) {
+          clearVideoStatusTimer();
+          setIsGeneratingVideo(false);
+          setIsPollingVideoStatus(false);
+          setError("Video generation failed. Please try again.");
+          return;
+        }
+
+        videoStatusTimerRef.current = setTimeout(() => {
+          pollVideoStatus(jobId, attempt + 1);
+        }, VIDEO_STATUS_POLL_INTERVAL);
+      } catch (statusError) {
+        console.error("[GolpoAI] pollVideoStatus error:", statusError);
+
+        videoStatusTimerRef.current = setTimeout(() => {
+          pollVideoStatus(jobId, attempt + 1);
+        }, VIDEO_STATUS_POLL_INTERVAL);
+      }
+    },
+    [clearVideoStatusTimer, handleVideoReady, safeInvoke]
+  );
+
+  const startVideoStatusPolling = useCallback(
+    (jobId) => {
+      if (!jobId) {
+        return;
+      }
+
+      clearVideoStatusTimer();
+      setVideoJobId(jobId);
+      setIsPollingVideoStatus(true);
+      setVideoStatusMessage("Your Golpo video is being generated...");
+      pollVideoStatus(jobId, 0);
+    },
+    [clearVideoStatusTimer, pollVideoStatus]
+  );
+
+  const handleCopyVideoUrl = useCallback(async (url) => {
+    if (!url) {
+      setCopyUrlMessage("No video URL available");
+      setTimeout(() => setCopyUrlMessage(""), 3000);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyUrlMessage("✓ URL copied to clipboard!");
+      // Clear message after 3 seconds
+      setTimeout(() => setCopyUrlMessage(""), 3000);
+    } catch (copyError) {
+      console.warn("[GolpoAI] Unable to copy video URL:", copyError);
+      // Fallback: select text in a temporary input
+      try {
+        const textArea = document.createElement("textarea");
+        textArea.value = url;
+        textArea.style.position = "fixed";
+        textArea.style.opacity = "0";
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textArea);
+        setCopyUrlMessage("✓ URL copied to clipboard!");
+        setTimeout(() => setCopyUrlMessage(""), 3000);
+      } catch (fallbackError) {
+        setCopyUrlMessage("Failed to copy URL. Please copy manually.");
+        setTimeout(() => setCopyUrlMessage(""), 5000);
+      }
+    }
+  }, []);
+
+  const openInNewTab = (url) => {
+    if (!url) {
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  const handlePlayVideo = useCallback((url) => {
+    if (!url) {
+      console.warn("[GolpoAI] No video URL provided for play");
+      return;
+    }
+    try {
+      // Try to play the video in the modal using the ref
+      if (videoElementRef.current) {
+        videoElementRef.current.play().catch(err => {
+          console.warn("[GolpoAI] Could not play video in modal, opening in new tab:", err);
+          openInNewTab(url);
+        });
+      } else {
+        // Fallback to opening in new tab
+        openInNewTab(url);
+      }
+    } catch (error) {
+      console.warn("[GolpoAI] Error playing video, opening in new tab:", error);
+      openInNewTab(url);
+    }
+  }, []);
+
+  const handleDownloadVideo = useCallback((url) => {
+    if (!url) {
+      console.warn("[GolpoAI] No video URL provided for download");
+      return;
+    }
+    try {
+      // First try fetch + blob download (works better with CORS)
+      fetch(url, { mode: 'cors' })
+        .then(response => {
+          if (!response.ok) throw new Error('Network response was not ok');
+          return response.blob();
+        })
+        .then(blob => {
+          const blobUrl = window.URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = blobUrl;
+          link.download = `golpo-video-${videoReadyInfo?.jobId || Date.now()}.mp4`;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          window.URL.revokeObjectURL(blobUrl);
+          console.log("[GolpoAI] Download initiated via blob for:", url);
+        })
+        .catch(fetchError => {
+          console.warn("[GolpoAI] Blob download failed, trying direct link:", fetchError);
+          // Fallback to direct link download
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = `golpo-video-${videoReadyInfo?.jobId || Date.now()}.mp4`;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          document.body.appendChild(link);
+          link.click();
+          setTimeout(() => {
+            document.body.removeChild(link);
+          }, 100);
+        });
+    } catch (downloadError) {
+      console.warn("[GolpoAI] Unable to download video, opening in new tab:", downloadError);
+      // Final fallback to opening in new tab
+      openInNewTab(url);
+    }
+  }, [videoReadyInfo]);
+
+  const closeVideoReadyModal = () => {
+    setShowVideoReadyModal(false);
+    setVideoReadyInfo(null);
+  };
 
   // Detect module type on mount
   useEffect(() => {
@@ -241,25 +833,50 @@ function App() {
     detectModuleType();
   }, []);
 
+  useEffect(() => {
+    const styleId = "golpo-loading-spinner-style";
+    if (!document.getElementById(styleId)) {
+      const styleTag = document.createElement("style");
+      styleTag.id = styleId;
+      styleTag.innerHTML = `
+        @keyframes golpo-spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `;
+      document.head.appendChild(styleTag);
+    }
+  }, []);
+
   // Fetch page info on load
   useEffect(() => {
     const fetchPageInfo = async (retryCount = 0) => {
       try {
         let pageInfo = null;
-        let isInvoked = false;
 
         // For contentBylineItem, prioritize getContext() first
         if (isBylineItem) {
           try {
             console.log("[GolpoAI] fetchPageInfo: contentBylineItem - trying getContext()");
             const context = await getContext();
-            console.log("[GolpoAI] fetchPageInfo: getContext() result:", context);
-            if (context?.content?.id) {
-              pageInfo = { id: context.content.id, title: context.content.title || "Page", type: context.content.type || "page" };
+            console.log("[GolpoAI] fetchPageInfo: getContext() result:", JSON.stringify(context, null, 2));
+            const pageId = extractPageIdFromContext(context);
+            if (pageId) {
+              pageInfo = { 
+                id: pageId, 
+                title: context.content?.title || context.extension?.content?.title || "Page", 
+                type: context.content?.type || context.extension?.content?.type || "page" 
+              };
               console.log("[GolpoAI] fetchPageInfo: Got page info from getContext()", pageInfo);
+            } else {
+              console.warn("[GolpoAI] fetchPageInfo: getContext() returned but no page ID found, trying URL");
             }
           } catch (contextErr) {
             console.warn("[GolpoAI] fetchPageInfo: getContext() failed, trying URL:", contextErr);
+          }
+          
+          // If getContext() didn't provide page ID, try URL parsing
+          if (!pageInfo || !pageInfo.id) {
             const pageIdFromUrl = getPageIdFromUrl();
             if (pageIdFromUrl) {
               pageInfo = { id: pageIdFromUrl, title: "Page from URL", type: "page" };
@@ -270,15 +887,20 @@ function App() {
           // For contentAction, try invoke first
           try {
             pageInfo = await safeInvoke("getCurrentPage", {});
-            isInvoked = true;
             console.log("[GolpoAI] getCurrentPage response (attempt " + (retryCount + 1) + "):", pageInfo);
           } catch (invokeError) {
             console.warn("[GolpoAI] invoke('getCurrentPage') failed, falling back to getContext():", invokeError);
             // Fallback to getContext()
             try {
               const context = await getContext();
-              if (context?.content?.id) {
-                pageInfo = { id: context.content.id, title: context.content.title || "Page", type: context.content.type || "page" };
+              console.log("[GolpoAI] fetchPageInfo: getContext() result:", JSON.stringify(context, null, 2));
+              const pageId = extractPageIdFromContext(context);
+              if (pageId) {
+                pageInfo = { 
+                  id: pageId, 
+                  title: context.content?.title || context.extension?.content?.title || "Page", 
+                  type: context.content?.type || context.extension?.content?.type || "page" 
+                };
                 console.log("[GolpoAI] fetchPageInfo: Got page info from getContext()", pageInfo);
               }
             } catch (contextErr) {
@@ -297,9 +919,7 @@ function App() {
 
           // Fetch full page details
           try {
-            const fullPageInfo = isInvoked
-              ? (await safeInvoke("getPageById", { pageId: pageInfo.id }))?.body
-              : await fetchPageByIdDirect(pageInfo.id);
+            const fullPageInfo = (await safeInvoke("getPageById", { pageId: pageInfo.id }))?.body;
 
             if (fullPageInfo) {
               console.log("[GolpoAI] Full page details fetched on load", fullPageInfo.id);
@@ -328,7 +948,12 @@ function App() {
         } else {
           console.warn("[GolpoAI] Page info not available or id is unknown:", pageInfo);
           // If no valid page info, clear any existing pages
+          // Don't set error here - page might be available when user clicks Generate Video
           setPages([]);
+          // Only set error if we've exhausted all retries
+          if (retryCount >= 2) {
+            console.log("[GolpoAI] All retries exhausted, page ID will be fetched when Generate Video is clicked");
+          }
         }
       } catch (err) {
         console.error("[GolpoAI] Error fetching current page:", err);
@@ -369,10 +994,10 @@ function App() {
       try {
         console.log("[GolpoAI] resolvePageId: contentBylineItem - trying getContext()");
         const context = await getContext();
-        console.log("[GolpoAI] resolvePageId: getContext() result:", context);
+        console.log("[GolpoAI] resolvePageId: getContext() result:", JSON.stringify(context, null, 2));
         
-        if (context?.content?.id) {
-          const pageId = context.content.id;
+        const pageId = extractPageIdFromContext(context);
+        if (pageId) {
           console.log("[GolpoAI] resolvePageId: Found page ID from getContext()", pageId);
           return pageId;
         }
@@ -391,12 +1016,10 @@ function App() {
     // For contentAction, try invoke first
     try {
       let current = null;
-      let isInvoked = false;
       
       try {
         console.log("[GolpoAI] resolvePageId: Trying invoke('getCurrentPage')");
         current = await safeInvoke("getCurrentPage", {});
-        isInvoked = true;
         console.log("[GolpoAI] resolvePageId: invoke('getCurrentPage') success", current);
       } catch (invokeError) {
         console.warn("[GolpoAI] resolvePageId: invoke('getCurrentPage') failed, trying alternatives:", invokeError);
@@ -404,9 +1027,14 @@ function App() {
         // Try getContext() as fallback
         try {
           const context = await getContext();
-          console.log("[GolpoAI] resolvePageId: getContext() result:", context);
-          if (context?.content?.id) {
-            current = { id: context.content.id, title: context.content.title, type: context.content.type };
+          console.log("[GolpoAI] resolvePageId: getContext() result:", JSON.stringify(context, null, 2));
+          const pageId = extractPageIdFromContext(context);
+          if (pageId) {
+            current = { 
+              id: pageId, 
+              title: context.content?.title || context.extension?.content?.title || "Page", 
+              type: context.content?.type || context.extension?.content?.type || "page" 
+            };
             console.log("[GolpoAI] resolvePageId: Using page ID from getContext()", current.id);
           }
         } catch (contextErr) {
@@ -442,44 +1070,44 @@ function App() {
     setError("");
 
     try {
+      // Use the same logic for both contentAction and contentBylineItem
       // First try to get page ID from resolvePageId
       let targetId = await resolvePageId();
       console.log("[GolpoAI] openModal: resolvePageId returned", targetId);
 
-      // If that fails, try multiple fallback methods
+      // If that fails, try the same fallback methods for both modules
       if (!targetId) {
         console.log("[GolpoAI] openModal: resolvePageId returned null, trying alternatives...");
         
-        // Try getContext() first (works for both contentAction and contentBylineItem)
+        // Try invoke first (works for contentAction, will fail for contentBylineItem)
         try {
-          const context = await getContext();
-          console.log("[GolpoAI] openModal: getContext() result:", context);
-          if (context?.content?.id) {
-            targetId = context.content.id;
-            console.log("[GolpoAI] openModal: Got page ID from getContext()", targetId);
+          const currentPage = await safeInvoke("getCurrentPage", {});
+          if (currentPage?.id && currentPage.id !== "unknown" && currentPage.id !== "current") {
+            targetId = currentPage.id;
+            console.log("[GolpoAI] openModal: Got page ID from getCurrentPage:", targetId);
           }
-        } catch (contextErr) {
-          console.warn("[GolpoAI] openModal: getContext() failed:", contextErr);
-        }
-        
-        // If still no ID, try invoke (for contentAction)
-        if (!targetId) {
+        } catch (invokeErr) {
+          if (invokeErr.message === "INVOKE_NOT_AVAILABLE") {
+            console.log("[GolpoAI] openModal: invoke not available (contentBylineItem), trying getContext()");
+          } else {
+            console.log("[GolpoAI] openModal: invoke error, trying getContext():", invokeErr);
+          }
+          
+          // Fallback to getContext() (works for both modules)
           try {
-            const currentPage = await safeInvoke("getCurrentPage", {});
-            if (currentPage?.id && currentPage.id !== "unknown" && currentPage.id !== "current") {
-              targetId = currentPage.id;
-              console.log("[GolpoAI] openModal: Got page ID from getCurrentPage:", targetId);
+            const context = await getContext();
+            console.log("[GolpoAI] openModal: getContext() result:", JSON.stringify(context, null, 2));
+            const pageId = extractPageIdFromContext(context);
+            if (pageId) {
+              targetId = pageId;
+              console.log("[GolpoAI] openModal: Got page ID from getContext()", targetId);
             }
-          } catch (invokeErr) {
-            if (invokeErr.message === "INVOKE_NOT_AVAILABLE") {
-              console.log("[GolpoAI] openModal: invoke not available, trying URL");
-            } else {
-              console.log("[GolpoAI] openModal: invoke error, trying URL:", invokeErr);
-            }
+          } catch (contextErr) {
+            console.warn("[GolpoAI] openModal: getContext() failed:", contextErr);
           }
         }
         
-        // Last resort: try URL parsing
+        // Last resort: try URL parsing (for both modules)
         if (!targetId) {
           targetId = getPageIdFromUrl();
           if (targetId) {
@@ -495,44 +1123,110 @@ function App() {
       
       console.log("[GolpoAI] openModal: Final page ID resolved", targetId);
 
-      console.log("[GolpoAI] handleGenerateVideoClick resolved page id", targetId);
-
-      // Determine if we should use invoke or direct API calls
-      let isInvoked = false;
-      try {
-        await safeInvoke("getPageById", { pageId: targetId });
-        isInvoked = true;
-      } catch (invokeErr) {
-        if (invokeErr.message !== "INVOKE_NOT_AVAILABLE") {
-          throw invokeErr;
-        }
-      }
-
-      // Fetch page and footer comments
+      // Use backend resolvers for all data fetching
       let pageBody = null;
       let footerResult = [];
 
-      if (isInvoked) {
+      try {
+        console.log("[GolpoAI] openModal: Fetching page and footer comments via backend for page", targetId);
         const [pageResponse, footerResponse] = await Promise.all([
           safeInvoke("getPageById", { pageId: targetId }),
           safeInvoke("getFooterComments", { pageId: targetId }),
         ]);
+
         pageBody = pageResponse?.body;
         footerResult = footerResponse?.body?.results || [];
-      } else {
-        pageBody = await fetchPageByIdDirect(targetId);
-        try {
-          const footerData = await fetchFooterCommentsDirect(targetId);
-          footerResult = footerData.results || [];
-        } catch (footerErr) {
-          console.warn("[GolpoAI] Could not fetch footer comments:", footerErr);
+
+        console.log("[GolpoAI] openModal: Successfully fetched via backend");
+        console.log("[GolpoAI] openModal: Footer comments response:", JSON.stringify(footerResponse?.body, null, 2));
+        console.log("[GolpoAI] openModal: Footer comments count:", footerResult.length);
+
+        if (footerResult && footerResult.length > 0) {
+          console.log("[GolpoAI] Footer Comments Details:");
+          footerResult.forEach((comment, index) => {
+            console.log(`[GolpoAI] Comment ${index + 1} (backend):`, {
+              id: comment.id,
+              body: comment.body,
+              bodyValue: comment.body?.storage?.value || comment.body?.atlas_doc_format?.value || comment.body,
+              author: comment.author,
+              authorId: comment.authorId,
+              createdAt: comment.createdAt,
+              version: comment.version,
+              status: comment.status,
+              _links: comment._links,
+            });
+          });
         }
+      } catch (invokeErr) {
+        console.error("[GolpoAI] openModal: Backend fetch failed:", invokeErr);
+        throw new Error(`Failed to fetch page data via backend: ${invokeErr.message}`);
       }
 
       console.log("[GolpoAI] handleGenerateVideoClick fetched document body", pageBody?.id);
       console.log("[GolpoAI] handleGenerateVideoClick fetched document body", pageBody);
-      console.log("[GolpoAI] handleGenerateVideoClick fetched footer comments", footerResult.length);
-      console.log("[GolpoAI] handleGenerateVideoClick fetched footer comments", footerResult);
+      console.log("[GolpoAI] handleGenerateVideoClick fetched footer comments count:", footerResult.length);
+      console.log("[GolpoAI] handleGenerateVideoClick fetched footer comments (full):", JSON.stringify(footerResult, null, 2));
+      
+      // Log detailed footer comment values with author information
+      if (footerResult && footerResult.length > 0) {
+        console.log("[GolpoAI] ========== RAW FOOTER COMMENTS ==========");
+        footerResult.forEach((comment, index) => {
+          const commentText = extractCommentBodyContent(comment);
+          const author = extractCommentAuthor(comment);
+          
+          console.log(`\n[GolpoAI] --- Raw Comment ${index + 1} ---`);
+          console.log("[GolpoAI] Comment ID:", comment.id);
+          console.log("[GolpoAI] Comment Author (extracted):", author);
+          console.log("[GolpoAI] Comment Author Object:", comment.author);
+          console.log("[GolpoAI] Comment Author ID:", comment.authorId);
+          console.log("[GolpoAI] Comment Value/Text (extracted):", commentText);
+          console.log("[GolpoAI] Comment Raw Body:", comment.body);
+          console.log("[GolpoAI] Comment Created At:", comment.createdAt);
+          console.log("[GolpoAI] Comment Full Object:", JSON.stringify(comment, null, 2));
+        });
+        console.log("\n[GolpoAI] ========== END OF RAW COMMENTS ==========");
+      } else {
+        console.log("[GolpoAI] No footer comments found for this page");
+      }
+
+      // Create document for Golpo AI API
+      const golpoAIDocument = createGolpoAIDocument(pageBody, footerResult);
+      
+      // Console log the document for verification
+      console.log("=".repeat(80));
+      console.log("[GolpoAI] ========== GOLPO AI DOCUMENT ==========");
+      console.log("=".repeat(80));
+      console.log("[GolpoAI] Document Object:", JSON.stringify(golpoAIDocument, null, 2));
+      console.log("[GolpoAI] Document Title:", golpoAIDocument.title);
+      console.log("[GolpoAI] Document Page ID:", golpoAIDocument.pageId);
+      console.log("[GolpoAI] Document Content Length:", golpoAIDocument.content.length, "characters");
+      console.log("[GolpoAI] Document Comments Count:", golpoAIDocument.comments.length);
+      console.log("[GolpoAI] Document Full Text Length:", golpoAIDocument.fullText.length, "characters");
+      console.log("[GolpoAI] Document Metadata:", golpoAIDocument.metadata);
+      
+      // Log detailed comment information
+      if (golpoAIDocument.comments && golpoAIDocument.comments.length > 0) {
+        console.log("\n[GolpoAI] ========== FOOTER COMMENTS DETAILS ==========");
+        golpoAIDocument.comments.forEach((comment, index) => {
+          console.log(`\n[GolpoAI] --- Comment ${index + 1} ---`);
+          console.log("[GolpoAI] Comment ID:", comment.id);
+          console.log("[GolpoAI] Comment Author:", comment.author);
+          console.log("[GolpoAI] Comment Author ID:", comment.authorId);
+          console.log("[GolpoAI] Comment Author Details:", comment.authorDetails);
+          console.log("[GolpoAI] Comment Created At:", comment.createdAt);
+          console.log("[GolpoAI] Comment Value/Text:", comment.body);
+          console.log("[GolpoAI] Comment Value Length:", comment.body.length, "characters");
+        });
+        console.log("\n[GolpoAI] ========== END OF COMMENTS ==========");
+      } else {
+        console.log("\n[GolpoAI] No footer comments found in document");
+      }
+      
+      console.log("\n[GolpoAI] ========== DOCUMENT FULL TEXT ==========");
+      console.log(golpoAIDocument.fullText);
+      console.log("=".repeat(80));
+      console.log("[GolpoAI] ========== END OF DOCUMENT ==========");
+      console.log("=".repeat(80));
 
       // Update document payload and pages with full document
       setDocumentPayload(pageBody);
@@ -544,6 +1238,9 @@ function App() {
       }
 
       setFooterComments(footerResult);
+      setGolpoAIDocument(golpoAIDocument); // Store document for video generation
+      console.log("[GolpoAI] Footer comments stored in state:", footerResult.length, "comments");
+      console.log("[GolpoAI] Golpo AI document stored in state for video generation");
 
       // Open specs modal after data is fetched
       setIsModalOpen(true);
@@ -557,6 +1254,80 @@ function App() {
       }
     } finally {
       setActionLoading(false);
+    }
+  };
+
+  // Handle video generation
+  const handleGenerateVideo = async () => {
+    if (!golpoAIDocument) {
+      setError("Document is not ready. Please try again.");
+      return;
+    }
+
+    setIsGeneratingVideo(true);
+    setIsPollingVideoStatus(false);
+    setError("");
+    setVideoGenerationResult(null);
+    setVideoStatusMessage("Contacting Golpo AI to generate your video...");
+
+    try {
+      console.log("[GolpoAI] handleGenerateVideo: Starting video generation");
+      console.log("[GolpoAI] handleGenerateVideo: Document:", golpoAIDocument);
+      console.log("[GolpoAI] handleGenerateVideo: Video specs:", {
+        duration,
+        voice,
+        language,
+        includeLogo,
+      });
+
+      // Prepare video specifications with all parameters
+      const videoSpecs = {
+        duration: duration,
+        voice: voice,
+        language: language,
+        includeLogo: includeLogo,
+        music: music,
+        style: style,
+        selectedQuickAction: description || (selectedAction !== null ? quickActions[selectedAction] : null),
+      };
+
+      // Call backend to generate video
+      const response = await safeInvoke("generateVideo", {
+        document: golpoAIDocument,
+        videoSpecs: videoSpecs,
+        description: description,
+      });
+
+      console.log("[GolpoAI] handleGenerateVideo: Video generation response:", response);
+      const responseBody = response?.body || response;
+
+      if (!responseBody) {
+        throw new Error("Invalid response from video generation API");
+      }
+
+      setVideoGenerationResult(responseBody);
+      const generatedJobId = extractJobIdFromResponse(responseBody);
+      const immediateVideoUrl = extractVideoUrlFromPayload(responseBody);
+
+      // Close specs modal once request is accepted
+      setIsModalOpen(false);
+
+      if (generatedJobId) {
+        console.log("[GolpoAI] handleGenerateVideo: Job id detected", generatedJobId);
+        startVideoStatusPolling(generatedJobId);
+      } else if (immediateVideoUrl) {
+        console.log("[GolpoAI] handleGenerateVideo: Video URL returned immediately");
+        handleVideoReady(responseBody);
+      } else {
+        console.warn("[GolpoAI] handleGenerateVideo: No job id or video URL returned, showing raw response");
+        handleVideoReady(responseBody);
+      }
+    } catch (err) {
+      console.error("[GolpoAI] handleGenerateVideo: Failed to generate video", err);
+      setError(`Failed to generate video: ${err.message || "Unknown error"}`);
+      clearVideoStatusTimer();
+      setIsGeneratingVideo(false);
+      setIsPollingVideoStatus(false);
     }
   };
 
@@ -693,11 +1464,23 @@ function App() {
   } : styles;
 
   return (
+    <>
     <div style={currentStyles.page}>
       {/* Close Button */}
       <button
-        onClick={() => view.close()}
+        onClick={async () => {
+          try {
+            await view.close();
+          } catch (error) {
+            console.error("[GolpoAI] Error closing view:", error);
+            // Fallback: try to close by hiding the UI
+            if (window.parent && window.parent.postMessage) {
+              window.parent.postMessage({ type: "close" }, "*");
+            }
+          }
+        }}
         style={currentStyles.closeButton}
+        aria-label="Close"
       >
         ✖
       </button>
@@ -878,19 +1661,143 @@ function App() {
             </div>
             </div>
 
+            {/* Error Display */}
+            {error && (
+              <div style={{ color: "red", marginBottom: 16, padding: 12, background: "#fee", borderRadius: 8 }}>
+                {error}
+              </div>
+            )}
+
+            {/* Video Generation Result */}
+            {videoGenerationResult && (
+              <div style={{ marginBottom: 16, padding: 12, background: "#efe", borderRadius: 8, color: "#060" }}>
+                <strong>Video Generation Started!</strong>
+                <pre style={{ marginTop: 8, fontSize: 12, overflow: "auto" }}>
+                  {JSON.stringify(videoGenerationResult, null, 2)}
+                </pre>
+              </div>
+            )}
+
             {/* Modal Footer */}
             <div style={styles.modalFooter}>
               <button style={styles.modalCancelButton} onClick={() => setIsModalOpen(false)}>
                 Cancel
               </button>
-              <button style={styles.modalGenerateButton}>
-                ✨ Generate Video
+              <button 
+                style={{
+                  ...styles.modalGenerateButton,
+                  ...((isGeneratingVideo || !golpoAIDocument) ? styles.modalGenerateButtonDisabled : {})
+                }}
+                onClick={handleGenerateVideo}
+                disabled={isGeneratingVideo || !golpoAIDocument}
+              >
+                {isGeneratingVideo ? "Generating..." : "✨ Generate Video"}
               </button>
             </div>
           </div>
         </div>
       )}
     </div>
+
+    {(isGeneratingVideo || isPollingVideoStatus) && (
+      <div style={styles.loadingOverlay}>
+        <div style={styles.loadingCard}>
+          <div style={styles.loadingSpinner} />
+          <div style={styles.loadingEmoji}>🎬</div>
+          <h3 style={styles.loadingTitle}>Generating your Golpo video</h3>
+          {videoStatusMessage && (
+            <p style={styles.loadingMessage}>{videoStatusMessage}</p>
+          )}
+          {videoJobId && (
+            <p style={styles.loadingJobId}>Job ID: {videoJobId}</p>
+          )}
+          <p style={styles.loadingSubtext}>
+            This usually takes less than a minute. You can keep this window open.
+          </p>
+        </div>
+      </div>
+    )}
+
+    {showVideoReadyModal && (
+      <div style={styles.videoReadyOverlay}>
+        <div style={styles.videoReadyCard}>
+          <button
+            style={styles.videoReadyCloseButton}
+            onClick={closeVideoReadyModal}
+            aria-label="Close video status"
+          >
+            ×
+          </button>
+          <h3 style={styles.videoReadyTitle}>🎉 Video generated successfully!</h3>
+          {videoReadyInfo?.jobId && (
+            <p style={styles.videoReadyMeta}>Job ID: {videoReadyInfo.jobId}</p>
+          )}
+          {videoReadyInfo?.videoUrl ? (
+            <>
+              <video
+                ref={videoElementRef}
+                style={styles.videoPreview}
+                src={videoReadyInfo.videoUrl}
+                controls
+                preload="auto"
+                crossOrigin="anonymous"
+                playsInline
+              />
+              {copyUrlMessage && (
+                <div style={{
+                  position: "fixed",
+                  top: "50%",
+                  left: "50%",
+                  transform: "translate(-50%, -50%)",
+                  padding: "16px 24px",
+                  background: "#10b981",
+                  color: "#fff",
+                  borderRadius: "12px",
+                  fontSize: "16px",
+                  textAlign: "center",
+                  fontWeight: 600,
+                  boxShadow: "0 10px 40px rgba(0,0,0,0.3)",
+                  zIndex: 10000,
+                  minWidth: "200px",
+                  animation: "fadeIn 0.3s ease-in",
+                }}>
+                  {copyUrlMessage}
+                </div>
+              )}
+              <div style={styles.videoReadyActions}>
+                <button
+                  style={styles.videoReadySecondaryButton}
+                  onClick={() => handleCopyVideoUrl(videoReadyInfo.videoUrl)}
+                >
+                  Copy URL
+                </button>
+                <button
+                  style={styles.videoReadyPrimaryButton}
+                  onClick={() => handlePlayVideo(videoReadyInfo.videoUrl)}
+                >
+                  Play video
+                </button>
+                <button
+                  style={styles.videoReadyPrimaryButton}
+                  onClick={() =>
+                    handleDownloadVideo(
+                      videoReadyInfo.downloadUrl || videoReadyInfo.videoUrl
+                    )
+                  }
+                >
+                  Download video
+                </button>
+              </div>
+            </>
+          ) : (
+            <pre style={styles.videoReadyDebug}>
+              {JSON.stringify(videoReadyInfo?.raw ?? videoReadyInfo, null, 2)}
+            </pre>
+          )}
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 
@@ -1185,6 +2092,14 @@ const styles = {
     color: "#fff",
     borderRadius: 10,
     cursor: "pointer",
+    border: "none",
+    fontSize: 14,
+    fontWeight: 600,
+    transition: "opacity 0.2s",
+  },
+  modalGenerateButtonDisabled: {
+    opacity: 0.5,
+    cursor: "not-allowed",
     fontSize: 14,
     fontWeight: 600,
     border: "none",
@@ -1192,5 +2107,131 @@ const styles = {
     alignItems: "center",
     gap: 6,
     transition: "all 0.2s",
+  },
+  loadingOverlay: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    background: "rgba(15, 23, 42, 0.75)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+    zIndex: 1000,
+    color: "#fff",
+    textAlign: "center",
+  },
+  loadingCard: {
+    background: "rgba(15, 23, 42, 0.92)",
+    borderRadius: 20,
+    padding: "32px 40px",
+    maxWidth: 420,
+    width: "90%",
+    boxShadow: "0 20px 40px rgba(15, 23, 42, 0.45)",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+  },
+  loadingSpinner: {
+    width: 36,
+    height: 36,
+    borderRadius: "50%",
+    border: "4px solid rgba(255,255,255,0.2)",
+    borderTopColor: "#fff",
+    animation: "golpo-spin 1s linear infinite",
+    marginBottom: 12,
+  },
+  loadingEmoji: { fontSize: 40, marginBottom: 12 },
+  loadingTitle: { margin: 0, fontSize: 20, fontWeight: 700 },
+  loadingMessage: { marginTop: 12, fontSize: 14 },
+  loadingJobId: { marginTop: 8, fontSize: 13, opacity: 0.85 },
+  loadingSubtext: { marginTop: 12, fontSize: 12, opacity: 0.7 },
+  videoReadyOverlay: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    background: "rgba(15, 23, 42, 0.65)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+    zIndex: 1001,
+  },
+  videoReadyCard: {
+    background: "#fff",
+    borderRadius: 20,
+    padding: "28px 32px",
+    maxWidth: 520,
+    width: "95%",
+    boxShadow: "0 25px 55px rgba(15, 23, 42, 0.25)",
+    position: "relative",
+    textAlign: "left",
+  },
+  videoReadyCloseButton: {
+    position: "absolute",
+    top: 16,
+    right: 16,
+    border: "none",
+    background: "transparent",
+    fontSize: 22,
+    cursor: "pointer",
+  },
+  videoReadyTitle: {
+    margin: 0,
+    fontSize: 22,
+    fontWeight: 700,
+    color: "#0f172a",
+  },
+  videoReadyMeta: {
+    marginTop: 8,
+    fontSize: 13,
+    color: "#475569",
+  },
+  videoPreview: {
+    width: "100%",
+    marginTop: 16,
+    borderRadius: 16,
+    background: "#000",
+  },
+  videoReadyActions: {
+    marginTop: 18,
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 12,
+  },
+  videoReadyPrimaryButton: {
+    flex: 1,
+    minWidth: 140,
+    padding: "12px 16px",
+    borderRadius: 12,
+    border: "none",
+    background: "linear-gradient(90deg, #7C3AED, #EC4899)",
+    color: "#fff",
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  videoReadySecondaryButton: {
+    flex: 1,
+    minWidth: 140,
+    padding: "12px 16px",
+    borderRadius: 12,
+    border: "1px solid #cbd5ff",
+    background: "#fff",
+    color: "#475569",
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  videoReadyDebug: {
+    marginTop: 16,
+    background: "#f8fafc",
+    borderRadius: 12,
+    padding: 12,
+    maxHeight: 220,
+    overflow: "auto",
+    fontSize: 12,
   },
 };

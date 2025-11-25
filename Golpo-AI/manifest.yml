@@ -33,4 +33,8 @@ permissions:
     - read:confluence-content.all
     - read:page:confluence
     - read:comment:confluence
+  external:
+    fetch:
+      backend:
+        - 'https://staging-api.golpoai.com/*'
 
