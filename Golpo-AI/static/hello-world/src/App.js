@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, view, getContext } from "@forge/bridge";
 import golpoIcon from "./static/golpo-logo.png";
 import VideoIcon from "./components/VideoIcon";
+import SparklesIcon from "./components/SparklesIcon";
 
 const APP_TITLE = "Golpo AI";
 const APP_TAGLINE = "Generate engaging videos from your Confluence page";
@@ -1722,7 +1723,9 @@ const isFailureStatus = (status) => {
                 ...(description ? currentStyles.generateButtonActive : currentStyles.generateButtonDisabled),
               }}
             >
-              <VideoIcon size={18} />
+              <span style={currentStyles.generateButtonIconWrapper}>
+                <VideoIcon size={16} />
+              </span>
             Generate Video
           </button>
         </div>
@@ -1846,7 +1849,8 @@ const isFailureStatus = (status) => {
                 onClick={handleGenerateVideo}
                 disabled={isGeneratingVideo || !golpoAIDocument}
               >
-                {isGeneratingVideo ? "Generating..." : "✨ Generate Video"}
+                {!isGeneratingVideo && <SparklesIcon size={18} />}
+                {isGeneratingVideo ? "Generating..." : "Generate Video"}
               </button>
             </div>
           </div>
@@ -2119,23 +2123,34 @@ const styles = {
 
   generateButton: {
     padding: "12px 24px",
-    borderRadius: 14,
+    borderRadius: 50,
     border: "none",
     cursor: "pointer",
     display: "flex",
     alignItems: "center",
-    gap: 8,
+    gap: 10,
     fontSize: 15,
     fontWeight: 600,
   },
   generateButtonActive: {
-    background: "linear-gradient(90deg, #7C3AED, #EC4899)",
+    background: "linear-gradient(to right, #cac6caff, #f5bdc4ff, #fff7ed)",
     color: "#fff",
+    boxShadow: "0 10px 20px rgba(250, 198, 205, 0.35)",
   },
   generateButtonDisabled: {
     background: "#ddd",
     cursor: "not-allowed",
     color: "#777",
+  },
+  generateButtonIconWrapper: {
+    width: 30,
+    height: 30,
+    borderRadius: 999,
+    background: "#fff",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
   },
 
   modalOverlay: {
@@ -2255,14 +2270,17 @@ const styles = {
   },
   modalGenerateButton: {
     padding: "10px 20px",
-    background: "linear-gradient(90deg, #7C3AED, #EC4899)",
+    background: "linear-gradient(90deg, #7A2E3A 0%, #FF8FA3 100%)",
     color: "#fff",
-    borderRadius: 10,
+    borderRadius: 50,
     cursor: "pointer",
     border: "none",
     fontSize: 14,
     fontWeight: 600,
     transition: "opacity 0.2s",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
   },
   modalGenerateButtonDisabled: {
     opacity: 0.5,
