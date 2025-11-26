@@ -123,6 +123,56 @@ resolver.define('getFooterComments', async ({ payload }) => {
   };
 });
 
+resolver.define('addFooterComment', async ({ payload }) => {
+  const { pageId, commentHtml } = payload ?? {};
+
+  if (!pageId) {
+    throw new Error('Page id is required to add footer comments.');
+  }
+
+  if (!commentHtml || typeof commentHtml !== 'string' || commentHtml.trim() === '') {
+    throw new Error('Comment body is required to add footer comments.');
+  }
+
+  const response = await api.asUser().requestConfluence(
+    route`/wiki/api/v2/footer-comments`,
+    {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        pageId,
+        body: {
+          representation: 'storage',
+          value: commentHtml
+        }
+      })
+    }
+  );
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error('Failed to add footer comment', {
+      pageId,
+      status: response.status,
+      statusText: response.statusText,
+      errorBody
+    });
+    throw new Error(`Unable to add footer comment for page ${pageId}. Status: ${response.status} ${response.statusText}`);
+  }
+
+  const resultBody = await response.json();
+  console.log('[resolver:addFooterComment] payload', JSON.stringify(resultBody));
+
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    body: resultBody
+  };
+});
+
 // Generate video using Golpo AI API
 resolver.define('generateVideo', async ({ payload }) => {
   const { document, videoSpecs, description } = payload ?? {};

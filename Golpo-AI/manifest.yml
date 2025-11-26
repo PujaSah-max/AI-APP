@@ -38,6 +38,7 @@ permissions:
     - read:confluence-content.all
     - read:page:confluence
     - read:comment:confluence
+    - write:comment:confluence
   external:
     fetch:
       backend:
