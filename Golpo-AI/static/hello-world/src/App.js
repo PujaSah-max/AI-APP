@@ -569,11 +569,13 @@ function App() {
   const [showVideoReadyModal, setShowVideoReadyModal] = useState(false);
   const [copyUrlMessage, setCopyUrlMessage] = useState("");
   const [videoPlayerUrl, setVideoPlayerUrl] = useState(null);
+  const [isPostingFooterComment, setIsPostingFooterComment] = useState(false);
 
   const maxChars = 500;
   const videoStatusTimerRef = useRef(null);
   const videoObjectUrlRef = useRef(null);
   const videoElementRef = useRef(null);
+  const lastFooterCommentJobIdRef = useRef(null);
   const cleanupVideoObjectUrl = useCallback(() => {
     if (videoObjectUrlRef.current) {
       URL.revokeObjectURL(videoObjectUrlRef.current);
@@ -711,6 +713,78 @@ const isFailureStatus = (status) => {
     },
     [clearVideoStatusTimer, videoJobId, prepareVideoSource]
   );
+
+  useEffect(() => {
+    if (!videoReadyInfo?.videoUrl) {
+      return;
+    }
+    postVideoLinkToFooter();
+  }, [videoReadyInfo?.videoUrl, videoReadyInfo?.jobId, postVideoLinkToFooter]);
+
+  const resolveCurrentPageId = useCallback(() => {
+    if (golpoAIDocument?.pageId) {
+      return golpoAIDocument.pageId;
+    }
+
+    if (documentPayload?.id) {
+      return documentPayload.id;
+    }
+
+    if (pages && pages.length > 0 && pages[0]?.id) {
+      return pages[0].id;
+    }
+
+    return null;
+  }, [golpoAIDocument, documentPayload, pages]);
+
+  const postVideoLinkToFooter = useCallback(async () => {
+    if (!videoReadyInfo?.videoUrl) {
+      return;
+    }
+
+    if (videoReadyInfo?.jobId && lastFooterCommentJobIdRef.current === videoReadyInfo.jobId) {
+      return;
+    }
+
+    const targetPageId = resolveCurrentPageId();
+
+    if (!targetPageId) {
+      console.warn("[GolpoAI] Unable to determine Confluence page ID for footer comment");
+      return;
+    }
+
+    setIsPostingFooterComment(true);
+
+    try {
+      const commentHtml = `<p><strong>Golpo AI video ready:</strong> <a href="${videoReadyInfo.videoUrl}" target="_blank" rel="noopener noreferrer">${videoReadyInfo.videoUrl}</a></p>`;
+
+      await safeInvoke("addFooterComment", {
+        pageId: targetPageId,
+        commentHtml,
+      });
+
+      if (videoReadyInfo?.jobId) {
+        lastFooterCommentJobIdRef.current = videoReadyInfo.jobId;
+      }
+
+      try {
+        const refreshedFooter = await safeInvoke("getFooterComments", { pageId: targetPageId });
+        const newFooterComments = refreshedFooter?.body || refreshedFooter;
+        if (Array.isArray(newFooterComments)) {
+          setFooterComments(newFooterComments);
+        }
+      } catch (refreshError) {
+        console.warn("[GolpoAI] Failed to refresh footer comments after posting link", refreshError);
+      }
+    } catch (commentError) {
+      console.error("[GolpoAI] Failed to automatically post video link to footer comments", commentError);
+      if (videoReadyInfo?.jobId && lastFooterCommentJobIdRef.current === videoReadyInfo.jobId) {
+        lastFooterCommentJobIdRef.current = null;
+      }
+    } finally {
+      setIsPostingFooterComment(false);
+    }
+  }, [videoReadyInfo, resolveCurrentPageId, safeInvoke, setFooterComments]);
 
   const pollVideoStatus = useCallback(
     async (jobId, attempt = 0) => {
