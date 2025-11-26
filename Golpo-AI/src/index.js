@@ -6,6 +6,91 @@ const resolver = new Resolver();
 // Base URL for Golpo AI API - default to staging, overridable via Forge variable
 const GOLPO_API_BASE_URL = (process.env.GOLPO_API_BASE_URL || 'https://staging-api.golpoai.com').replace(/\/$/, '');
 
+const durationLabelMap = {
+  '30 sec': 0.5,
+  '1 min': 1,
+  '2 min': 2,
+  '3 min': 3,
+  '5 min': 5,
+};
+
+// Map display language names to backend accepted keywords
+const languageKeywordMap = {
+  'English': 'english',
+  'Hindi': 'hindi',
+  'Spanish': 'spanish',
+  'French': 'french',
+  'German': 'german',
+  'Italian': 'italian',
+  'Portuguese': 'portuguese',
+  'Russian': 'russian',
+  'Japanese': 'japanese',
+  'Korean': 'korean',
+  'Chinese': 'chinese',
+  'Mandarin': 'mandarin',
+  'Arabic': 'arabic',
+  'Dutch': 'dutch',
+  'Polish': 'polish',
+  'Turkish': 'turkish',
+  'Swedish': 'swedish',
+  'Danish': 'danish',
+  'Norwegian': 'norwegian',
+  'Finnish': 'finnish',
+  'Greek': 'greek',
+  'Czech': 'czech',
+  'Hungarian': 'hungarian',
+  'Romanian': 'romanian',
+  'Thai': 'thai',
+  'Vietnamese': 'vietnamese',
+  'Indonesian': 'indonesian',
+  'Malay': 'malay',
+  'Tamil': 'tamil',
+  'Telugu': 'telugu',
+  'Bengali': 'bengali',
+  'Marathi': 'marathi',
+  'Gujarati': 'gujarati',
+  'Kannada': 'kannada',
+  'Malayalam': 'malayalam',
+  'Punjabi': 'punjabi',
+  'Urdu': 'urdu',
+};
+
+const parseDurationToMinutes = (input) => {
+  if (typeof input === 'number' && !Number.isNaN(input)) {
+    return input;
+  }
+
+  if (typeof input === 'string') {
+    const numericValue = parseFloat(input);
+    if (!Number.isNaN(numericValue)) {
+      return numericValue;
+    }
+
+    const normalized = input.trim().toLowerCase();
+    if (durationLabelMap[normalized]) {
+      return durationLabelMap[normalized];
+    }
+
+    const minutesMatch = normalized.match(/([\d.]+)\s*(min|minute|minutes)/);
+    if (minutesMatch) {
+      const minutes = parseFloat(minutesMatch[1]);
+      if (!Number.isNaN(minutes)) {
+        return minutes;
+      }
+    }
+
+    const secondsMatch = normalized.match(/([\d.]+)\s*(sec|second|seconds)/);
+    if (secondsMatch) {
+      const seconds = parseFloat(secondsMatch[1]);
+      if (!Number.isNaN(seconds)) {
+        return seconds / 60;
+      }
+    }
+  }
+
+  return null;
+};
+
 const requestPageById = async (pageId) => {
   if (!pageId) {
     throw new Error('Page id is required to load Confluence page details.');
@@ -149,6 +234,8 @@ resolver.define('generateVideo', async ({ payload }) => {
 
   // Extract values from videoSpecs
   const {
+    durationMinutes,
+    durationLabel,
     duration = '1 min',
     voice = 'solo-female',
     language = 'English',
@@ -159,10 +246,88 @@ resolver.define('generateVideo', async ({ payload }) => {
   } = videoSpecs || {};
 
   // Map duration to timing value
-  const timingValue = duration === '30 sec' ? '0.5' : duration === '2 min' ? '2' : '1';
+  const resolvedDuration =
+    parseDurationToMinutes(durationMinutes) ??
+    parseDurationToMinutes(durationLabel) ??
+    parseDurationToMinutes(duration) ??
+    1;
+  const timingValue = resolvedDuration.toString();
+  const videoType = resolvedDuration <= 1 ? 'short' : 'long';
 
   // Map voice to correct format (convert "Solo Female" to "solo-female", etc.)
   const videoVoice = voice.toLowerCase().replace(/\s+/g, '-') || 'solo-female';
+
+  // Map language to backend accepted keyword
+  // Convert display name (e.g., "English") to backend keyword (e.g., "english")
+  // Also handle direct keywords (e.g., "english", "en") and lowercase variants
+  const normalizeLanguage = (lang) => {
+    if (!lang) return 'english'; // Default to English
+    
+    const normalized = lang.trim();
+    
+    // Check if it's already a valid keyword (lowercase)
+    if (languageKeywordMap[normalized] || Object.values(languageKeywordMap).includes(normalized.toLowerCase())) {
+      return languageKeywordMap[normalized] || normalized.toLowerCase();
+    }
+    
+    // Try to find in the map (case-insensitive)
+    const found = Object.keys(languageKeywordMap).find(
+      key => key.toLowerCase() === normalized.toLowerCase()
+    );
+    
+    if (found) {
+      return languageKeywordMap[found];
+    }
+    
+    // Handle special cases: "en" -> "english", "zh" -> "chinese", etc.
+    const codeMap = {
+      'en': 'english',
+      'hi': 'hindi',
+      'es': 'spanish',
+      'fr': 'french',
+      'de': 'german',
+      'it': 'italian',
+      'pt': 'portuguese',
+      'ru': 'russian',
+      'ja': 'japanese',
+      'ko': 'korean',
+      'zh': 'chinese',
+      'ar': 'arabic',
+      'nl': 'dutch',
+      'pl': 'polish',
+      'tr': 'turkish',
+      'sv': 'swedish',
+      'da': 'danish',
+      'no': 'norwegian',
+      'fi': 'finnish',
+      'el': 'greek',
+      'cs': 'czech',
+      'hu': 'hungarian',
+      'ro': 'romanian',
+      'th': 'thai',
+      'vi': 'vietnamese',
+      'id': 'indonesian',
+      'ms': 'malay',
+      'ta': 'tamil',
+      'te': 'telugu',
+      'bn': 'bengali',
+      'mr': 'marathi',
+      'gu': 'gujarati',
+      'kn': 'kannada',
+      'ml': 'malayalam',
+      'pa': 'punjabi',
+      'ur': 'urdu',
+    };
+    
+    if (codeMap[normalized.toLowerCase()]) {
+      return codeMap[normalized.toLowerCase()];
+    }
+    
+    // Default: try lowercase, fallback to english
+    return normalized.toLowerCase() || 'english';
+  };
+  
+  const videoLanguage = normalizeLanguage(language);
 
   // Use the structured document created from fetched page data and footer comments
   // The document.fullText contains: TITLE, CONTENT, and FOOTER COMMENTS
@@ -180,14 +345,14 @@ resolver.define('generateVideo', async ({ payload }) => {
     bg_music: (music || 'engaging').toLowerCase(),
     video_duration: timingValue,
     video_voice: videoVoice,
-    video_type: 'long', // Ensure video type is set to 'long' for video generation
+    video_type: videoType,
     audio_only: false, // Explicitly set to false to generate video, not audio
-    use_color: true, // Enable color for video
+    use_color: false, // Enable color for video
     video_style: true, // Enable video style
     include_watermark: false,
     logo_url: includeLogo ? 'INCLUDE_LOGO' : null,
     logo_placement: null,
-    language: language || 'English',
+    language: videoLanguage,
     voice_instructions: videoVoice || '',
     video_instructions: style || '',
     script_mode: false,
@@ -201,6 +366,12 @@ resolver.define('generateVideo', async ({ payload }) => {
     logo: includeLogo ? 'INCLUDE_LOGO' : null,
     timing: timingValue,
     new_script: issueDocument || description || null, // Use the document created from page data and footer comments
+    aspect_ratio: '16:9', // Force landscape orientation (16:9 aspect ratio)
+    orientation: 'landscape', // Force landscape orientation
+    video_orientation: 'landscape', // Alternative parameter name for orientation
+    video_aspect_ratio: '16:9', // Alternative parameter name for aspect ratio
+    format: 'landscape', // Alternative format parameter
+    video_format: 'landscape', // Alternative video format parameter
   };
 
   console.log('[resolver:generateVideo] requestBody:', JSON.stringify(requestBody, null, 2));
@@ -369,6 +540,184 @@ resolver.define('fetchVideoFile', async ({ payload }) => {
     }
     
     throw new Error(`Failed to fetch video file: ${error.message}`);
+  }
+});
+
+// Add video URL to the page content itself
+resolver.define('addVideoToPageContent', async ({ payload }) => {
+  const { pageId, videoUrl, jobId } = payload ?? {};
+
+  if (!pageId) {
+    throw new Error('Page id is required to update page content.');
+  }
+
+  if (!videoUrl) {
+    throw new Error('Video URL is required to update page content.');
+  }
+
+  console.log('[resolver:addVideoToPageContent] Adding video URL to page content for page', pageId, 'with video URL:', videoUrl);
+
+  try {
+    // First, get the current page to preserve existing content and get version number
+    const getPageResponse = await api.asUser().requestConfluence(
+      route`/wiki/api/v2/pages/${pageId}?body-format=storage`,
+      {
+        headers: {
+          'Accept': 'application/json'
+        }
+      }
+    );
+
+    if (!getPageResponse.ok) {
+      const errorBody = await getPageResponse.text();
+      console.error('[resolver:addVideoToPageContent] Failed to get current page', {
+        pageId,
+        status: getPageResponse.status,
+        statusText: getPageResponse.statusText,
+        errorBody
+      });
+      throw new Error(`Unable to get current page ${pageId}. Status: ${getPageResponse.status} ${getPageResponse.statusText}`);
+    }
+
+    const currentPage = await getPageResponse.json();
+    const currentVersion = currentPage.version?.number || 1;
+    const currentBody = currentPage.body?.storage?.value || '';
+    const currentTitle = currentPage.title || '';
+
+    // Create the video section HTML with copy and download buttons
+    // Using Confluence storage format with proper HTML structure and styled buttons
+    const videoSection = `
+<hr />
+<h2>🎬 Golpo AI Generated Video</h2>
+<p><strong>Video URL:</strong> <a href="${videoUrl}">${videoUrl}</a></p>
+<p style="margin-top: 16px; margin-bottom: 16px;">
+  <a href="${videoUrl}" 
+     style="display: inline-block; padding: 12px 24px; margin-right: 12px; background: linear-gradient(120deg, #2B1F35 0%, #FF4D6D 100%); color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; box-shadow: 0 4px 12px rgba(43, 31, 53, 0.3);" 
+     title="Click to copy video URL">
+    📋 Copy Video URL
+  </a>
+  <a href="${videoUrl}" 
+     download
+     style="display: inline-block; padding: 12px 24px; background: linear-gradient(120deg, #2B1F35 0%, #FF4D6D 100%); color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; box-shadow: 0 4px 12px rgba(43, 31, 53, 0.3);" 
+     title="Download the video file">
+    ⬇️ Download Video
+  </a>
+</p>
+<hr />`;
+
+    // Append the video section to existing content
+    const updatedBody = currentBody + videoSection;
+
+    // Update the page with new content
+    const updateResponse = await api.asUser().requestConfluence(
+      route`/wiki/api/v2/pages/${pageId}`,
+      {
+        method: 'PUT',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          id: pageId,
+          status: 'current',
+          title: currentTitle,
+          body: {
+            representation: 'storage',
+            value: updatedBody
+          },
+          version: {
+            number: currentVersion + 1,
+            message: 'Added Golpo AI generated video link'
+          }
+        })
+      }
+    );
+
+    if (!updateResponse.ok) {
+      const errorBody = await updateResponse.text();
+      console.error('[resolver:addVideoToPageContent] Failed to update page content', {
+        pageId,
+        status: updateResponse.status,
+        statusText: updateResponse.statusText,
+        errorBody
+      });
+      throw new Error(`Unable to update page content for page ${pageId}. Status: ${updateResponse.status} ${updateResponse.statusText}`);
+    }
+
+    const updatedPage = await updateResponse.json();
+    console.log('[resolver:addVideoToPageContent] Page content updated successfully:', JSON.stringify(updatedPage, null, 2));
+
+    return {
+      status: updateResponse.status,
+      statusText: updateResponse.statusText,
+      body: updatedPage
+    };
+  } catch (error) {
+    console.error('[resolver:addVideoToPageContent] Error updating page content:', error);
+    throw new Error(`Failed to add video to page content: ${error.message}`);
+  }
+});
+
+// Add video URL as a footer comment to the Confluence page
+resolver.define('addVideoCommentToPage', async ({ payload }) => {
+  const { pageId, videoUrl, jobId } = payload ?? {};
+
+  if (!pageId) {
+    throw new Error('Page id is required to add footer comment.');
+  }
+
+  if (!videoUrl) {
+    throw new Error('Video URL is required to add footer comment.');
+  }
+
+  // Create the comment body with video URL
+  // Format: Display the video URL as a clickable link in Confluence storage format
+  const commentBody = `<p>🎬 <strong>Golpo AI Video Generated</strong></p>
+<p>Video URL: <a href="${videoUrl}">${videoUrl}</a></p>`;
+
+  console.log('[resolver:addVideoCommentToPage] Adding footer comment to page', pageId, 'with video URL:', videoUrl);
+
+  try {
+    const response = await api.asUser().requestConfluence(
+      route`/wiki/api/v2/footer-comments`,
+      {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          pageId: pageId,
+          body: {
+            representation: 'storage',
+            value: commentBody
+          }
+        })
+      }
+    );
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error('[resolver:addVideoCommentToPage] Failed to create footer comment', {
+        pageId,
+        status: response.status,
+        statusText: response.statusText,
+        errorBody
+      });
+      throw new Error(`Unable to add footer comment to page ${pageId}. Status: ${response.status} ${response.statusText}`);
+    }
+
+    const commentData = await response.json();
+    console.log('[resolver:addVideoCommentToPage] Footer comment created successfully:', JSON.stringify(commentData, null, 2));
+
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      body: commentData
+    };
+  } catch (error) {
+    console.error('[resolver:addVideoCommentToPage] Error creating footer comment:', error);
+    throw new Error(`Failed to add video comment to page: ${error.message}`);
   }
 });
 

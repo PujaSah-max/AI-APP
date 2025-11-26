@@ -1,13 +1,58 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke, view, getContext } from "@forge/bridge";
 import golpoIcon from "./static/golpo-logo.png";
-import VideoIcon from "./components/VideoIcon";
 import SparklesIcon from "./components/SparklesIcon";
 
 const APP_TITLE = "Golpo AI";
 const APP_TAGLINE = "Generate engaging videos from your Confluence page";
 
 const quickActions = ["Whiteboard explainer video of Confluence page"];
+const durationOptions = [
+  { label: "30 sec", minutes: 0.5 },
+  { label: "1 min", minutes: 1 },
+  { label: "2 min", minutes: 2 },
+  { label: "3 min", minutes: 3 },
+  { label: "5 min", minutes: 5 },
+];
+const languageOptions = [
+  "English",
+  "Hindi",
+  "Spanish",
+  "French",
+  "German",
+  "Italian",
+  "Portuguese",
+  "Russian",
+  "Japanese",
+  "Korean",
+  "Chinese",
+  "Mandarin",
+  "Arabic",
+  "Dutch",
+  "Polish",
+  "Turkish",
+  "Swedish",
+  "Danish",
+  "Norwegian",
+  "Finnish",
+  "Greek",
+  "Czech",
+  "Hungarian",
+  "Romanian",
+  "Thai",
+  "Vietnamese",
+  "Indonesian",
+  "Malay",
+  "Tamil",
+  "Telugu",
+  "Bengali",
+  "Marathi",
+  "Gujarati",
+  "Kannada",
+  "Malayalam",
+  "Punjabi",
+  "Urdu",
+];
 const VIDEO_STATUS_POLL_INTERVAL = 5000; // ms
 
 // Helper to strip HTML/markup for summaries
@@ -543,12 +588,16 @@ function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   // Video specification options
-  const [duration, setDuration] = useState("1 min");
+  const [duration, setDuration] = useState(durationOptions[1].minutes.toString());
   const [voice, setVoice] = useState("Solo Female");
   const [language, setLanguage] = useState("English");
   const [includeLogo, setIncludeLogo] = useState(false);
   const [music, setMusic] = useState("engaging");
   const [style, setStyle] = useState("");
+  const selectedDurationOption = useMemo(
+    () => durationOptions.find((option) => option.minutes.toString() === duration) ?? durationOptions[1],
+    [duration]
+  );
 
   // Detect if we're in contentBylineItem (no resolver available)
   const [isBylineItem, setIsBylineItem] = useState(false);
@@ -686,7 +735,7 @@ const isFailureStatus = (status) => {
 };
 
   const handleVideoReady = useCallback(
-    (statusPayload, jobId = null) => {
+    async (statusPayload, jobId = null) => {
       if (!statusPayload) {
         return;
       }
@@ -708,8 +757,72 @@ const isFailureStatus = (status) => {
       setVideoReadyInfo(normalizedInfo);
       prepareVideoSource(videoUrl);
       setShowVideoReadyModal(true);
+
+      // Automatically add video URL to page content and as footer comment
+      if (videoUrl && !isBylineItem) {
+        try {
+          // Get page ID from various sources
+          const pageId = documentPayload?.id || pages[0]?.id || golpoAIDocument?.pageId;
+          
+          if (pageId && pageId !== "unknown" && pageId !== "current") {
+            console.log("[GolpoAI] handleVideoReady: Adding video URL to page content for page", pageId);
+            
+            // Add video to page content (main content area)
+            try {
+              await safeInvoke("addVideoToPageContent", {
+                pageId: pageId,
+                videoUrl: videoUrl,
+                jobId: normalizedInfo.jobId
+              });
+              console.log("[GolpoAI] handleVideoReady: Successfully added video URL to page content");
+              
+              // Refresh the page to show the updated content immediately
+              // Try to refresh parent window if in iframe, otherwise refresh current window
+              setTimeout(() => {
+                try {
+                  if (window.parent && window.parent !== window) {
+                    // We're in an iframe, try to refresh parent
+                    window.parent.location.reload();
+                  } else {
+                    // We're in the main window, refresh it
+                    window.location.reload();
+                  }
+                } catch (refreshError) {
+                  // If refresh fails (e.g., cross-origin), show a message to user
+                  console.warn("[GolpoAI] handleVideoReady: Could not auto-refresh page:", refreshError);
+                  setCopyUrlMessage("Video link added to page! Please refresh to see it.");
+                  setTimeout(() => setCopyUrlMessage(""), 5000);
+                }
+              }, 1000); // Small delay to ensure the update is processed
+            } catch (contentError) {
+              // Don't block the UI if content update fails - just log the error
+              console.warn("[GolpoAI] handleVideoReady: Failed to add video to page content (non-blocking):", contentError);
+            }
+
+            // Also add as footer comment for reference
+            try {
+              await safeInvoke("addVideoCommentToPage", {
+                pageId: pageId,
+                videoUrl: videoUrl,
+                jobId: normalizedInfo.jobId
+              });
+              console.log("[GolpoAI] handleVideoReady: Successfully added video URL to footer comments");
+            } catch (commentError) {
+              // Don't block the UI if comment creation fails - just log the error
+              console.warn("[GolpoAI] handleVideoReady: Failed to add footer comment (non-blocking):", commentError);
+            }
+          } else {
+            console.warn("[GolpoAI] handleVideoReady: No valid page ID found, skipping video link addition");
+          }
+        } catch (err) {
+          // Don't block the UI if there's an error
+          console.warn("[GolpoAI] handleVideoReady: Error attempting to add video link (non-blocking):", err);
+        }
+      } else if (isBylineItem) {
+        console.log("[GolpoAI] handleVideoReady: Skipping video link addition (contentBylineItem module)");
+      }
     },
-    [clearVideoStatusTimer, videoJobId, prepareVideoSource]
+    [clearVideoStatusTimer, videoJobId, prepareVideoSource, documentPayload, pages, golpoAIDocument, isBylineItem, safeInvoke]
   );
 
   const pollVideoStatus = useCallback(
@@ -1421,10 +1534,13 @@ const isFailureStatus = (status) => {
     setVideoStatusMessage("Contacting Golpo AI to generate your video...");
 
     try {
+      const durationMinutes = selectedDurationOption.minutes;
+
       console.log("[GolpoAI] handleGenerateVideo: Starting video generation");
       console.log("[GolpoAI] handleGenerateVideo: Document:", golpoAIDocument);
       console.log("[GolpoAI] handleGenerateVideo: Video specs:", {
-        duration,
+        durationMinutes,
+        durationLabel: selectedDurationOption.label,
         voice,
         language,
         includeLogo,
@@ -1432,7 +1548,8 @@ const isFailureStatus = (status) => {
 
       // Prepare video specifications with all parameters
       const videoSpecs = {
-        duration: duration,
+        durationMinutes,
+        durationLabel: selectedDurationOption.label,
         voice: voice,
         language: language,
         includeLogo: includeLogo,
@@ -1724,9 +1841,9 @@ const isFailureStatus = (status) => {
               }}
             >
               <span style={currentStyles.generateButtonIconWrapper}>
-                <VideoIcon size={16} />
+                <SparklesIcon size={18} />
               </span>
-            Generate Video
+              ✨ Generate Video
           </button>
         </div>
       </section>
@@ -1768,12 +1885,16 @@ const isFailureStatus = (status) => {
                   value={duration}
                   onChange={(e) => setDuration(e.target.value)}
                   >
-                    <option value="30 sec">30 sec</option>
-                    <option value="1 min">1 min</option>
-                    <option value="2 min">2 min</option>
-                    <option value="3 min">3 min</option>
-                    <option value="5 min">5 min</option>
+                    {durationOptions.map((option) => (
+                      <option key={option.label} value={option.minutes}>
+                        {option.label}
+                      </option>
+                    ))}
                   </select>
+                  {/* <p style={styles.formHelperText}>
+                    Sends {selectedDurationOption.minutes} minute
+                    {selectedDurationOption.minutes === 1 ? "" : "s"} ({selectedDurationOption.label}) to Golpo AI.
+                  </p> */}
               </div>
 
                 <div style={styles.formField}>
@@ -1797,11 +1918,11 @@ const isFailureStatus = (status) => {
                   value={language}
                   onChange={(e) => setLanguage(e.target.value)}
                 >
-                  <option value="English">English</option>
-                  <option value="Spanish">Spanish</option>
-                  <option value="French">French</option>
-                  <option value="German">German</option>
-                  <option value="Hindi">Hindi</option>
+                  {languageOptions.map((lang) => (
+                    <option key={lang} value={lang}>
+                      {lang}
+                    </option>
+                  ))}
                 </select>
               </div>
 
@@ -1849,7 +1970,7 @@ const isFailureStatus = (status) => {
                 onClick={handleGenerateVideo}
                 disabled={isGeneratingVideo || !golpoAIDocument}
               >
-                {!isGeneratingVideo && <SparklesIcon size={18} />}
+                {!isGeneratingVideo && <SparklesIcon size={20} />}
                 {isGeneratingVideo ? "Generating..." : "Generate Video"}
               </button>
             </div>
@@ -1871,7 +1992,8 @@ const isFailureStatus = (status) => {
             <p style={styles.loadingJobId}>Job ID: {videoJobId}</p>
           )}
           <p style={styles.loadingSubtext}>
-            This usually takes less than a minute. You can keep this window open.
+            This usually takes some time. You can keep this window open.
+            Vedio will be saved on page after completion.
           </p>
             </div>
       </div>
@@ -1887,7 +2009,7 @@ const isFailureStatus = (status) => {
           >
             ×
           </button>
-          <h3 style={styles.videoReadyTitle}>🎉 Video generated successfully!</h3>
+          <h3 style={styles.videoReadyTitle}> Video generated successfully!</h3>
           {videoReadyInfo?.jobId && (
             <p style={styles.videoReadyMeta}>Job ID: {videoReadyInfo.jobId}</p>
           )}
@@ -2122,35 +2244,34 @@ const styles = {
   },
 
   generateButton: {
-    padding: "12px 24px",
-    borderRadius: 50,
+    padding: "12px 30px",
+    borderRadius: 999,
     border: "none",
     cursor: "pointer",
     display: "flex",
     alignItems: "center",
-    gap: 10,
+    gap: 12,
     fontSize: 15,
     fontWeight: 600,
+    color: "#fff",
+    transition: "transform 0.2s ease, box-shadow 0.2s ease",
   },
   generateButtonActive: {
-    background: "linear-gradient(to right, #cac6caff, #f5bdc4ff, #fff7ed)",
+    background: "linear-gradient(120deg, #2B1F35 0%, #FF4D6D 55% 100%)",
     color: "#fff",
-    boxShadow: "0 10px 20px rgba(250, 198, 205, 0.35)",
+    boxShadow: "0 18px 36px rgba(255, 77, 109, 0.4)",
   },
   generateButtonDisabled: {
-    background: "#ddd",
+    background: "linear-gradient(120deg, #C9C7D1 0%, #F7D8E1 100%)",
     cursor: "not-allowed",
-    color: "#777",
+    color: "rgba(255,255,255,0.9)",
+    boxShadow: "none",
   },
   generateButtonIconWrapper: {
-    width: 30,
-    height: 30,
-    borderRadius: 999,
-    background: "#fff",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
+    color: "inherit",
   },
 
   modalOverlay: {
@@ -2217,6 +2338,12 @@ const styles = {
     fontWeight: 500,
     color: "#334155",
   },
+  formHelperText: {
+    fontSize: 12,
+    color: "#64748b",
+    marginTop: 6,
+    marginBottom: 0,
+  },
   formSelect: {
     width: "100%",
     padding: "10px 12px",
@@ -2269,29 +2396,32 @@ const styles = {
     transition: "all 0.2s",
   },
   modalGenerateButton: {
-    padding: "10px 20px",
-    background: "linear-gradient(90deg, #7A2E3A 0%, #FF8FA3 100%)",
+    padding: "12px 30px",
+    background: "linear-gradient(120deg, #2B1F35 0%, #FF4D6D 55%, #FF9FB0 100%)",
     color: "#fff",
-    borderRadius: 50,
+    borderRadius: 999,
     cursor: "pointer",
     border: "none",
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: 600,
-    transition: "opacity 0.2s",
+    transition: "transform 0.2s ease, box-shadow 0.2s ease",
     display: "flex",
     alignItems: "center",
-    gap: 8,
+    gap: 12,
+    boxShadow: "0 18px 36px rgba(255, 77, 109, 0.4)",
   },
   modalGenerateButtonDisabled: {
-    opacity: 0.5,
+    background: "linear-gradient(120deg, #C9C7D1 0%, #F7D8E1 100%)",
     cursor: "not-allowed",
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: 600,
     border: "none",
     display: "flex",
     alignItems: "center",
-    gap: 6,
+    gap: 12,
     transition: "all 0.2s",
+    boxShadow: "none",
+    color: "rgba(255,255,255,0.9)",
   },
   loadingOverlay: {
     position: "fixed",
@@ -2378,9 +2508,11 @@ const styles = {
   },
   videoPreview: {
     width: "100%",
+    maxHeight: "70vh",
     marginTop: 16,
     borderRadius: 16,
     background: "#000",
+    objectFit: "contain", // Maintain aspect ratio and fit within container
   },
   videoReadyActions: {
     marginTop: 18,
@@ -2405,10 +2537,11 @@ const styles = {
     padding: "12px 16px",
     borderRadius: 12,
     border: "none",
-    background: "linear-gradient(90deg, #7C3AED, #EC4899)",
+    background: "linear-gradient(120deg, #2B1F35 0%, #FF4D6D 100%)",
     color: "#fff",
     fontWeight: 600,
     cursor: "pointer",
+    boxShadow: "0 12px 24px rgba(43, 31, 53, 0.25)",
   },
   videoActionDisabled: {
     cursor: "not-allowed",
@@ -2420,9 +2553,9 @@ const styles = {
     minWidth: 140,
     padding: "12px 16px",
     borderRadius: 12,
-    border: "1px solid #cbd5ff",
+    border: "1px solid #2B1F35",
     background: "#fff",
-    color: "#475569",
+    color: "#2B1F35",
     fontWeight: 600,
     cursor: "pointer",
   },
