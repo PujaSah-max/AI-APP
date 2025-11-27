@@ -545,7 +545,7 @@ resolver.define('fetchVideoFile', async ({ payload }) => {
 
 // Add video URL to the page content itself
 resolver.define('addVideoToPageContent', async ({ payload }) => {
-  const { pageId, videoUrl, jobId } = payload ?? {};
+  const { pageId, videoUrl, videoSectionHtml } = payload ?? {};
 
   if (!pageId) {
     throw new Error('Page id is required to update page content.');
@@ -553,6 +553,10 @@ resolver.define('addVideoToPageContent', async ({ payload }) => {
 
   if (!videoUrl) {
     throw new Error('Video URL is required to update page content.');
+  }
+
+  if (!videoSectionHtml) {
+    throw new Error('Video section HTML is required to update page content.');
   }
 
   console.log('[resolver:addVideoToPageContent] Adding video URL to page content for page', pageId, 'with video URL:', videoUrl);
@@ -584,29 +588,29 @@ resolver.define('addVideoToPageContent', async ({ payload }) => {
     const currentBody = currentPage.body?.storage?.value || '';
     const currentTitle = currentPage.title || '';
 
-    // Create the video section HTML with copy and download buttons
-    // Using Confluence storage format with proper HTML structure and styled buttons
-    const videoSection = `
-<hr />
-<h2>🎬 Golpo AI Generated Video</h2>
-<p><strong>Video URL:</strong> <a href="${videoUrl}">${videoUrl}</a></p>
-<p style="margin-top: 16px; margin-bottom: 16px;">
-  <a href="${videoUrl}" 
-     style="display: inline-block; padding: 12px 24px; margin-right: 12px; background: linear-gradient(120deg, #2B1F35 0%, #FF4D6D 100%); color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; box-shadow: 0 4px 12px rgba(43, 31, 53, 0.3);" 
-     title="Click to copy video URL">
-    📋 Copy Video URL
-  </a>
-  <a href="${videoUrl}" 
-     download
-     style="display: inline-block; padding: 12px 24px; background: linear-gradient(120deg, #2B1F35 0%, #FF4D6D 100%); color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; box-shadow: 0 4px 12px rgba(43, 31, 53, 0.3);" 
-     title="Download the video file">
-    ⬇️ Download Video
-  </a>
-</p>
-<hr />`;
-
-    // Append the video section to existing content
-    const updatedBody = currentBody + videoSection;
+    // Check if there's already a video section in the page content
+    // Use the comment markers to reliably find and replace the video section
+    const videoSectionStartMarker = '<!-- GOLPO_AI_VIDEO_SECTION_START -->';
+    const videoSectionEndMarker = '<!-- GOLPO_AI_VIDEO_SECTION_END -->';
+    
+    // Pattern to match everything from start marker to end marker (non-greedy)
+    const videoSectionPattern = new RegExp(
+      videoSectionStartMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + 
+      '[\\s\\S]*?' + 
+      videoSectionEndMarker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+      'i'
+    );
+    
+    let updatedBody;
+    if (videoSectionPattern.test(currentBody)) {
+      // Replace existing video section with the new one
+      updatedBody = currentBody.replace(videoSectionPattern, videoSectionHtml);
+      console.log('[resolver:addVideoToPageContent] Found existing video section, replacing with new one');
+    } else {
+      // No existing video section found, append the new one
+      updatedBody = currentBody + videoSectionHtml;
+      console.log('[resolver:addVideoToPageContent] No existing video section found, appending new one');
+    }
 
     // Update the page with new content
     const updateResponse = await api.asUser().requestConfluence(
@@ -660,7 +664,7 @@ resolver.define('addVideoToPageContent', async ({ payload }) => {
 
 // Add video URL as a footer comment to the Confluence page
 resolver.define('addVideoCommentToPage', async ({ payload }) => {
-  const { pageId, videoUrl, jobId } = payload ?? {};
+  const { pageId, videoUrl, commentBodyHtml } = payload ?? {};
 
   if (!pageId) {
     throw new Error('Page id is required to add footer comment.');
@@ -670,10 +674,12 @@ resolver.define('addVideoCommentToPage', async ({ payload }) => {
     throw new Error('Video URL is required to add footer comment.');
   }
 
-  // Create the comment body with video URL
-  // Format: Display the video URL as a clickable link in Confluence storage format
-  const commentBody = `<p>🎬 <strong>Golpo AI Video Generated</strong></p>
-<p>Video URL: <a href="${videoUrl}">${videoUrl}</a></p>`;
+  if (!commentBodyHtml) {
+    throw new Error('Comment body HTML is required to add footer comment.');
+  }
+
+  // Use the comment body HTML provided by frontend
+  const commentBody = commentBodyHtml;
 
   console.log('[resolver:addVideoCommentToPage] Adding footer comment to page', pageId, 'with video URL:', videoUrl);
 
