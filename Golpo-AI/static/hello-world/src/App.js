@@ -637,6 +637,7 @@ function App() {
   const [videoPlayerUrl, setVideoPlayerUrl] = useState(null);
   const [latestVideoUrl, setLatestVideoUrl] = useState(null);
   const [showVideoExistsModal, setShowVideoExistsModal] = useState(false);
+  const [videoOrientation, setVideoOrientation] = useState("portrait"); // "landscape" or "portrait"
 
   const maxChars = 500;
   const videoStatusTimerRef = useRef(null);
@@ -653,6 +654,7 @@ function App() {
   const prepareVideoSource = useCallback(
     async (url) => {
       cleanupVideoObjectUrl();
+      setVideoOrientation("portrait"); // Reset to default, will be updated when metadata loads
       if (!url) {
         return;
       }
@@ -2149,7 +2151,7 @@ const requireContentActionForMedia = useCallback(
             )}
             <p style={styles.loadingSubtext}>
               This usually takes some time. You can keep this window open.
-              Vedio will be saved on page after completion.
+              Video will be saved on page and in the comments section after completion.
             </p>
           </div>
         </div>
@@ -2238,12 +2240,22 @@ const requireContentActionForMedia = useCallback(
               <>
                 <video
                   ref={videoElementRef}
-                  style={styles.videoPreview}
+                  style={{
+                    ...styles.videoPreview,
+                    maxHeight: videoOrientation === "landscape" ? "50vh" : "70vh",
+                  }}
                   src={videoPlayerUrl || undefined}
                   controls
                   preload="auto"
                   crossOrigin="anonymous"
                   playsInline
+                  onLoadedMetadata={(e) => {
+                    const video = e.target;
+                    if (video.videoWidth && video.videoHeight) {
+                      const isLandscape = video.videoWidth > video.videoHeight;
+                      setVideoOrientation(isLandscape ? "landscape" : "portrait");
+                    }
+                  }}
                 />
                 {!videoPlayerUrl && videoReadyInfo?.videoUrl && (
                   <div style={{ padding: "20px", textAlign: "center", color: "#666" }}>
@@ -2827,13 +2839,12 @@ const styles = {
   },
   videoPreview: {
     width: "100%",
-    aspectRatio: "9:16",
     maxWidth: "200px",
-    maxHeight: "30vh",
     marginTop: 16,
     borderRadius: 16,
     background: "#000",
     objectFit: "contain", // Show full video without cropping
+    // maxHeight will be set dynamically based on orientation (50vh for landscape, 70vh for portrait)
   },
   videoReadyActions: {
     marginTop: 18,
