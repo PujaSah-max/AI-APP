@@ -586,10 +586,10 @@ const escapeJsString = (str) => {
 const QuickActionIcon = () => (
   <span style={styles.actionIconWrapper}>
     <svg width="18" height="18" viewBox="0 0 36 36" fill="none">
-      <rect x="4" y="9" width="20" height="18" rx="6" stroke="#8856ff" strokeWidth="3" />
+      <rect x="4" y="9" width="20" height="18" rx="6" stroke="#FF4D6D" strokeWidth="3" />
       <path
         d="M24 16.5L31 12V24L24 19.5"
-        stroke="#8856ff"
+        stroke="#FF4D6D"
         strokeWidth="3"
         strokeLinecap="round"
         strokeLinejoin="round"
@@ -805,50 +805,11 @@ function App() {
     return keywords.some((keyword) => normalized.includes(keyword));
   };
 
-  const extractLatestVideoUrlFromBody = (pageData) => {
-    if (!pageData) {
-      return null;
-    }
-    const storageValue = pageData.body?.storage?.value;
-    if (!storageValue) {
-      return null;
-    }
-    const markerRegex = /<!-- GOLPO_AI_VIDEO_SECTION_START -->([\s\S]*?)<!-- GOLPO_AI_VIDEO_SECTION_END -->/i;
-    const markerMatch = storageValue.match(markerRegex);
-    const htmlToSearch = markerMatch ? markerMatch[1] : storageValue;
-    const hrefMatch = htmlToSearch.match(/href="([^"]+)"/i);
-    return hrefMatch ? hrefMatch[1] : null;
-  };
-
-  // Extract all video URLs from page body and comments
+  // Extract all video URLs from comments only
   const extractAllVideoUrls = useCallback((pageData, comments) => {
     const videoUrls = new Set(); // Use Set to avoid duplicates
-    
-    // Extract from page body
-    if (pageData?.body?.storage?.value) {
-      const storageValue = pageData.body.storage.value;
-      const markerRegex = /<!-- GOLPO_AI_VIDEO_SECTION_START -->([\s\S]*?)<!-- GOLPO_AI_VIDEO_SECTION_END -->/gi;
-      let markerMatch;
-      while ((markerMatch = markerRegex.exec(storageValue)) !== null) {
-        const htmlToSearch = markerMatch[1];
-        const hrefMatches = htmlToSearch.matchAll(/href="([^"]+)"/gi);
-        for (const match of hrefMatches) {
-          if (match[1] && match[1].includes('http')) {
-            videoUrls.add(match[1]);
-          }
-        }
-      }
-      // Also check for URLs in the entire body content
-      const allHrefMatches = storageValue.matchAll(/href="([^"]+\.mp4[^"]*)"|href="([^"]*golpo[^"]*)"|href="([^"]*video[^"]*\.mp4[^"]*)"/gi);
-      for (const match of allHrefMatches) {
-        const url = match[1] || match[2] || match[3];
-        if (url && url.includes('http')) {
-          videoUrls.add(url);
-        }
-      }
-    }
 
-    // Extract from comments
+    // Extract from comments only
     if (comments && Array.isArray(comments)) {
       comments.forEach((comment) => {
         const commentText = extractCommentBodyContent(comment);
@@ -906,16 +867,8 @@ function App() {
       setVideoReadyInfo(normalizedInfo);
       prepareVideoSource(videoUrl);
       setShowVideoReadyModal(true);
-      if (videoUrl) {
-        setLatestVideoUrl(videoUrl);
-        // Update all videos list and set current index
-        setAllVideoUrls(prev => {
-          const updated = prev.includes(videoUrl) ? prev : [videoUrl, ...prev];
-          const index = updated.indexOf(videoUrl);
-          setCurrentVideoIndex(index >= 0 ? index : 0);
-          return updated;
-        });
-      }
+      // Note: latestVideoUrl will be fetched from comments after page refresh
+      // Do not set it directly here - only fetch from comments
 
       // Automatically add video URL to page content and as footer comment
       if (videoUrl && !isBylineItem) {
@@ -1426,23 +1379,31 @@ function App() {
         if (pageInfo && pageInfo.id && pageInfo.id !== "unknown" && pageInfo.id !== "current") {
           console.log("[GolpoAI] Initial page fetched", pageInfo.id);
 
-          // Fetch full page details
+          // Fetch full page details and footer comments in parallel for faster loading
           try {
-            const fullPageInfo = (await safeInvoke("getPageById", { pageId: pageInfo.id }))?.body;
+            const [fullPageInfoResponse, footerCommentsResponse] = await Promise.all([
+              safeInvoke("getPageById", { pageId: pageInfo.id }),
+              safeInvoke("getFooterComments", { pageId: pageInfo.id })
+            ]);
+
+            const fullPageInfo = fullPageInfoResponse?.body;
+            const fetchedFooterComments = footerCommentsResponse?.body?.results || [];
+
+            // Set footer comments state
+            setFooterComments(fetchedFooterComments);
 
             if (fullPageInfo) {
               console.log("[GolpoAI] Full page details fetched on load", fullPageInfo.id);
               setDocumentPayload(fullPageInfo);
-              const existingVideoUrl = extractLatestVideoUrlFromBody(fullPageInfo);
-              if (existingVideoUrl) {
-                setLatestVideoUrl(existingVideoUrl);
-              }
-              // Extract all video URLs
-              const allUrls = extractAllVideoUrls(fullPageInfo, footerComments);
+              
+              // Extract all video URLs from comments immediately
+              const allUrls = extractAllVideoUrls(null, fetchedFooterComments);
               setAllVideoUrls(allUrls);
-              if (allUrls.length > 0 && existingVideoUrl) {
-                const index = allUrls.indexOf(existingVideoUrl);
-                setCurrentVideoIndex(index >= 0 ? index : 0);
+              if (allUrls.length > 0) {
+                // Set latest video URL from comments (first one)
+                setLatestVideoUrl(allUrls[0]);
+                setCurrentVideoIndex(0);
+                console.log("[GolpoAI] Latest video URL set from comments:", allUrls[0]);
               }
               const mapped = toUiPage(fullPageInfo);
               if (mapped) {
@@ -1451,6 +1412,16 @@ function App() {
             } else {
               // Fallback to basic page info if full fetch returns empty body
               setDocumentPayload(pageInfo);
+              
+              // Still extract video URLs from comments even if page body fetch failed
+              const allUrls = extractAllVideoUrls(null, fetchedFooterComments);
+              setAllVideoUrls(allUrls);
+              if (allUrls.length > 0) {
+                setLatestVideoUrl(allUrls[0]);
+                setCurrentVideoIndex(0);
+                console.log("[GolpoAI] Latest video URL set from comments (fallback):", allUrls[0]);
+              }
+              
               const mapped = toUiPage(pageInfo);
               if (mapped) {
                 setPages([mapped]);
@@ -1485,12 +1456,8 @@ function App() {
         }
       }
     };
-    // Wait a bit for isBylineItem to be detected, then fetch
-    const timer = setTimeout(() => {
-      fetchPageInfo();
-    }, 100);
-
-    return () => clearTimeout(timer);
+    // Fetch immediately when UI loads (no delay)
+    fetchPageInfo();
   }, [isBylineItem]);
 
   // Resolve page ID from various sources
@@ -1750,16 +1717,13 @@ function App() {
 
       // Update document payload and pages with full document
       setDocumentPayload(pageBody);
-      const modalExistingVideoUrl = extractLatestVideoUrlFromBody(pageBody);
-      if (modalExistingVideoUrl) {
-        setLatestVideoUrl(modalExistingVideoUrl);
-      }
-      // Extract all video URLs
-      const allUrls = extractAllVideoUrls(pageBody, footerResult);
+      // Extract all video URLs from comments only
+      const allUrls = extractAllVideoUrls(null, footerResult);
       setAllVideoUrls(allUrls);
       if (allUrls.length > 0) {
-        const index = modalExistingVideoUrl ? allUrls.indexOf(modalExistingVideoUrl) : 0;
-        setCurrentVideoIndex(index >= 0 ? index : 0);
+        // Set latest video URL from comments (first one)
+        setLatestVideoUrl(allUrls[0]);
+        setCurrentVideoIndex(0);
       }
       const mapped = toUiPage(pageBody);
       if (mapped) {
@@ -2204,10 +2168,10 @@ function App() {
                     fill="none"
                     xmlns="http://www.w3.org/2000/svg"
                   >
-                    <rect x="4" y="9" width="20" height="18" rx="6" stroke="#FFFFFF" strokeWidth="3" fill="none" />
+                    <rect x="4" y="9" width="20" height="18" rx="6" stroke={description.length > 0 ? "#FF4D6D" : "#fff"} strokeWidth="3" fill="none" />
                     <path
                       d="M24 16.5L31 12V24L24 19.5"
-                      stroke="#FFFFFF"
+                      stroke={description.length > 0 ? "#FF4D6D" : "#fff"}
                       strokeWidth="3"
                       strokeLinecap="round"
                       strokeLinejoin="round"
@@ -2238,10 +2202,10 @@ function App() {
               <div style={styles.modalHeader}>
                 <div style={styles.modalIconWrapper}>
                   <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                    <rect x="2" y="4" width="14" height="12" rx="3" stroke="#7C3AED" strokeWidth="2" />
+                    <rect x="2" y="4" width="14" height="12" rx="3" stroke="#FF4D6D" strokeWidth="2" />
                     <path
                       d="M16 10L21 6V18L16 14"
-                      stroke="#7C3AED"
+                      stroke="#FF4D6D"
                       strokeWidth="2"
                       strokeLinecap="round"
                       strokeLinejoin="round"
@@ -2383,10 +2347,10 @@ function App() {
           <div style={styles.videoExistsCard}>
             <div style={styles.videoExistsHeader}>
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                <rect x="2" y="4" width="14" height="12" rx="3" stroke="#7C3AED" strokeWidth="2" />
+                <rect x="2" y="4" width="14" height="12" rx="3" stroke="#FF4D6D" strokeWidth="2" />
                 <path
                   d="M16 10L21 6V18L16 14"
-                  stroke="#7C3AED"
+                  stroke="#FF4D6D"
                   strokeWidth="2"
                   strokeLinecap="round"
                   strokeLinejoin="round"
@@ -2863,7 +2827,6 @@ const styles = {
     width: 32,
     height: 32,
     borderRadius: 10,
-    background: "#f5f6fb",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -3022,7 +2985,6 @@ const styles = {
     width: 40,
     height: 40,
     borderRadius: 10,
-    background: "#f5f3ff",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
