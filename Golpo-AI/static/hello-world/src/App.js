@@ -625,6 +625,7 @@ function App() {
   const [footerComments, setFooterComments] = useState([]);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState("");
+  const [durationWarning, setDurationWarning] = useState(null);
   const [golpoAIDocument, setGolpoAIDocument] = useState(null);
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
   const [videoGenerationResult, setVideoGenerationResult] = useState(null);
@@ -643,6 +644,61 @@ function App() {
   const [isLoadingVideo, setIsLoadingVideo] = useState(false); // Loading state for "Go to Video" button
 
   const maxChars = 500;
+
+  // Calculate minimum required duration based on document length
+  // Typical video narration: ~150-200 words per minute
+  // Average word length: ~5 characters, so ~750-1000 characters per minute
+  const calculateMinimumDuration = useCallback((documentText) => {
+    if (!documentText || documentText.trim() === '') return 0;
+    
+    // Estimate words (rough approximation: split by spaces)
+    const wordCount = documentText.trim().split(/\s+/).length;
+    
+    // Use conservative estimate: 150 words per minute
+    const wordsPerMinute = 150;
+    const minimumMinutes = Math.ceil(wordCount / wordsPerMinute);
+    
+    return minimumMinutes;
+  }, []);
+
+  // Check if selected duration is sufficient and show warning
+  const validateDuration = useCallback(() => {
+    if (!golpoAIDocument) {
+      setDurationWarning(null);
+      return true;
+    }
+
+    const documentText = golpoAIDocument?.fullText || golpoAIDocument?.content || '';
+    const minimumDuration = calculateMinimumDuration(documentText);
+    const selectedMinutes = selectedDurationOption.minutes;
+
+    if (minimumDuration > 0 && selectedMinutes < minimumDuration) {
+      // Find suitable duration options from dropdown
+      const suitableOptions = durationOptions.filter(opt => opt.minutes >= minimumDuration);
+      const suggestedDurations = suitableOptions.length > 0 
+        ? suitableOptions.map(opt => opt.label).join(', ')
+        : durationOptions[durationOptions.length - 1].label; // Fallback to longest option
+      const warningMessage = `The selected duration (${selectedDurationOption.label}) may be too short for the document content. Estimated minimum duration: ${minimumDuration} minute${minimumDuration !== 1 ? 's' : ''}. Suggested duration${suitableOptions.length > 1 ? 's' : ''}: ${suggestedDurations}`;
+      
+      setDurationWarning({
+        type: 'warning',
+        message: warningMessage,
+        minimumDuration,
+        suggestedDurations: suitableOptions.length > 0 ? suitableOptions : [durationOptions[durationOptions.length - 1]]
+      });
+      return false;
+    } else {
+      setDurationWarning(null);
+      return true;
+    }
+  }, [golpoAIDocument, selectedDurationOption, calculateMinimumDuration]);
+
+  // Validate duration when it changes or document is loaded
+  useEffect(() => {
+    if (golpoAIDocument) {
+      validateDuration();
+    }
+  }, [duration, golpoAIDocument, validateDuration]);
   const videoStatusTimerRef = useRef(null);
   const videoObjectUrlRef = useRef(null);
   const videoElementRef = useRef(null);
@@ -1778,11 +1834,19 @@ function App() {
       return;
     }
 
+    // Validate duration before generating
+    const isValidDuration = validateDuration();
+    if (!isValidDuration && durationWarning) {
+      // Show error with warning message
+      setError(durationWarning.message);
+      console.warn("[GolpoAI] Duration validation failed:", durationWarning.message);
+      return;
+    }
+
     setIsGeneratingVideo(true);
     setIsPollingVideoStatus(false);
     setError("");
     setVideoGenerationResult(null);
-    setVideoStatusMessage("Status: Processing");
 
     try {
       const durationMinutes = selectedDurationOption.minutes;
@@ -1809,12 +1873,50 @@ function App() {
         selectedQuickAction: description || (selectedAction !== null ? quickActions[selectedAction] : null),
       };
 
-      // Call backend to generate video
+      // Step 1: Convert document to script using Gemini AI
+      const issueDocument = golpoAIDocument?.fullText || golpoAIDocument?.content || '';
+      let generatedScript = null;
+
+      if (issueDocument) {
+        try {
+          setVideoStatusMessage("Converting document to script via Gemini AI...");
+          console.log("[GolpoAI] Step 1: Converting issue document to script via Gemini AI...");
+          console.log("[GolpoAI] Document length:", issueDocument.length, "characters");
+          console.log("[GolpoAI] Description:", description || "None");
+          console.log("[GolpoAI] Video specs for script generation:", {
+            duration: selectedDurationOption.label,
+            language: language,
+          });
+
+          // Note: The conversion happens in the backend generateVideo resolver
+          // We log here to show the process has started
+          console.log("[GolpoAI] Sending document to backend for Gemini AI script conversion...");
+        } catch (geminiError) {
+          console.error("[GolpoAI] Failed to prepare script conversion:", geminiError);
+          // Continue with document if script generation fails
+        }
+      }
+
+      // Step 2: Generate video with the script (conversion happens in backend)
+      setVideoStatusMessage("Generating video with script...");
+      console.log("[GolpoAI] Step 2: Calling backend to generate video (script conversion will happen server-side)...");
+
+      // Call backend to generate video (Gemini conversion happens inside this call)
       const response = await safeInvoke("generateVideo", {
         document: golpoAIDocument,
         videoSpecs: videoSpecs,
         description: description,
       });
+
+      console.log("[GolpoAI] handleGenerateVideo: Video generation response received");
+      
+      // Check if script was generated (backend logs will show this)
+      if (response?.body?.scriptGenerated) {
+        console.log("[GolpoAI] ✓ Script successfully generated via Gemini AI");
+        console.log("[GolpoAI] Script preview:", response.body.scriptPreview || "Available in backend logs");
+      } else {
+        console.log("[GolpoAI] Using document directly (script generation may have been skipped or failed)");
+      }
 
       console.log("[GolpoAI] handleGenerateVideo: Video generation response:", response);
       const responseBody = response?.body || response;
@@ -2234,10 +2336,6 @@ function App() {
                         </option>
                       ))}
                     </select>
-                    {/* <p style={styles.formHelperText}>
-                    Sends {selectedDurationOption.minutes} minute
-                    {selectedDurationOption.minutes === 1 ? "" : "s"} ({selectedDurationOption.label}) to Golpo AI.
-                  </p> */}
                   </div>
 
                   <div style={styles.formField}>
@@ -2253,6 +2351,85 @@ function App() {
                     </select>
                   </div>
                 </div>
+
+                {/* Duration Warning - Horizontal layout spanning full width */}
+                {durationWarning && (
+                  <div style={{
+                    marginTop: 12,
+                    marginBottom: 12,
+                    padding: "12px 16px",
+                    borderRadius: 8,
+                    background: "#FFF4E6",
+                    border: "1px solid #FFB84D",
+                    fontSize: 13,
+                    color: "#8B4513",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 16,
+                    flexWrap: "wrap"
+                  }}>
+                    <div style={{ 
+                      fontWeight: 600, 
+                      fontSize: 16,
+                      flexShrink: 0
+                    }}>⚠️</div>
+                    <div style={{ 
+                      flex: 1,
+                      minWidth: 200,
+                      lineHeight: 1.5
+                    }}>
+                      <div style={{ fontWeight: 600, marginBottom: 4 }}>Duration Warning</div>
+                      <div>{durationWarning.message}</div>
+                    </div>
+                    {durationWarning.suggestedDurations && durationWarning.suggestedDurations.length > 0 && (
+                      <div style={{ 
+                        display: "flex", 
+                        gap: 8, 
+                        flexWrap: "wrap",
+                        alignItems: "center",
+                        flexShrink: 0
+                      }}>
+                        <div style={{ 
+                          fontWeight: 500, 
+                          fontSize: 12,
+                          color: "#8B4513",
+                          marginRight: 4
+                        }}>Suggested:</div>
+                        {durationWarning.suggestedDurations.map((option) => (
+                          <button
+                            key={option.label}
+                            onClick={() => {
+                              setDuration(option.minutes.toString());
+                              setDurationWarning(null);
+                            }}
+                            style={{
+                              padding: "6px 14px",
+                              borderRadius: 6,
+                              border: "1px solid #FFB84D",
+                              background: "#FFFFFF",
+                              color: "#8B4513",
+                              fontSize: 12,
+                              fontWeight: 500,
+                              cursor: "pointer",
+                              transition: "all 0.2s",
+                              whiteSpace: "nowrap"
+                            }}
+                            onMouseEnter={(e) => {
+                              e.target.style.background = "#FFB84D";
+                              e.target.style.color = "#FFFFFF";
+                            }}
+                            onMouseLeave={(e) => {
+                              e.target.style.background = "#FFFFFF";
+                              e.target.style.color = "#8B4513";
+                            }}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div style={styles.formField}>
                   <label style={styles.formLabel}>Language</label>
@@ -3390,52 +3567,52 @@ const styles = {
   },
 };
 
-const buildVideoSectionHtml = (videoUrl) => {
-  const safeUrl = videoUrl || "";
-  const escapedUrl = escapeHtml(safeUrl);
-  const escapedUrlForJs = escapeJsString(safeUrl);
+// const buildVideoSectionHtml = (videoUrl) => {
+//   const safeUrl = videoUrl || "";
+//   const escapedUrl = escapeHtml(safeUrl);
+//   const escapedUrlForJs = escapeJsString(safeUrl);
 
-  return `<!-- GOLPO_AI_VIDEO_SECTION_START -->
-<div style="background: #E8F5E9; border-radius: 12px; padding: 20px; margin: 24px 0; border: 1px solid #C8E6C9;">
-  <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 16px;">
-    <div style="width: 48px; height: 48px; background: #A5D6A7; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect x="3" y="5" width="14" height="12" rx="2" fill="#FFFFFF"/>
-        <path d="M17 10L21 7V17L17 14V10Z" fill="#FFFFFF"/>
-      </svg>
-    </div>
-    <div style="flex: 1;">
-      <p style="margin: 0; font-size: 14px; color: #2E7D32; line-height: 1.4;">
-        A video explanation has been generated for this page using Golpo AI.
-      </p>
-       <p style="margin: 0; fontSize: 14px; color: #424242; word-break: break-all; font-family: monospace;">
-      <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="color: #424242; text-decoration: underline; cursor: pointer;">${escapedUrl}</a>
-    </p>
-    </div>
-  </div>
+//   return `<!-- GOLPO_AI_VIDEO_SECTION_START -->
+// <div style="background: #E8F5E9; border-radius: 12px; padding: 20px; margin: 24px 0; border: 1px solid #C8E6C9;">
+//   <div style="display: flex; align-items: flex-start; gap: 12px; margin-bottom: 16px;">
+//     <div style="width: 48px; height: 48px; background: #A5D6A7; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+//       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+//         <rect x="3" y="5" width="14" height="12" rx="2" fill="#FFFFFF"/>
+//         <path d="M17 10L21 7V17L17 14V10Z" fill="#FFFFFF"/>
+//       </svg>
+//     </div>
+//     <div style="flex: 1;">
+//       <p style="margin: 0; font-size: 14px; color: #2E7D32; line-height: 1.4;">
+//         A video explanation has been generated for this page using Golpo AI.
+//       </p>
+//        <p style="margin: 0; fontSize: 14px; color: #424242; word-break: break-all; font-family: monospace;">
+//       <a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" style="color: #424242; text-decoration: underline; cursor: pointer;">${escapedUrl}</a>
+//     </p>
+//     </div>
+//   </div>
 
-  <div style="display: flex; gap: 12px; flex-wrap: wrap;">
-    <button onclick="(function(){const url='${escapedUrlForJs}';if(navigator.clipboard){navigator.clipboard.writeText(url).then(()=>alert('Link copied to clipboard!')).catch(()=>{const el=document.createElement('textarea');el.value=url;el.style.position='fixed';el.style.opacity='0';document.body.appendChild(el);el.select();document.execCommand('copy');document.body.removeChild(el);alert('Link copied to clipboard!')})}else{const el=document.createElement('textarea');el.value=url;el.style.position='fixed';el.style.opacity='0';document.body.appendChild(el);el.select();document.execCommand('copy');document.body.removeChild(el);alert('Link copied to clipboard!')}})()" style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; background: #2E7D32; color: #FFFFFF; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='#1B5E20'" onmouseout="this.style.background='#2E7D32'">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect x="5" y="5" width="8" height="8" rx="1" stroke="currentColor" stroke-width="1.5" fill="none"/>
-        <rect x="3" y="3" width="8" height="8" rx="1" stroke="currentColor" stroke-width="1.5" fill="none"/>
-      </svg>
-      Copy URL
-    </button>
+//   <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+//     <button onclick="(function(){const url='${escapedUrlForJs}';if(navigator.clipboard){navigator.clipboard.writeText(url).then(()=>alert('Link copied to clipboard!')).catch(()=>{const el=document.createElement('textarea');el.value=url;el.style.position='fixed';el.style.opacity='0';document.body.appendChild(el);el.select();document.execCommand('copy');document.body.removeChild(el);alert('Link copied to clipboard!')})}else{const el=document.createElement('textarea');el.value=url;el.style.position='fixed';el.style.opacity='0';document.body.appendChild(el);el.select();document.execCommand('copy');document.body.removeChild(el);alert('Link copied to clipboard!')}})()" style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; background: #2E7D32; color: #FFFFFF; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='#1B5E20'" onmouseout="this.style.background='#2E7D32'">
+//       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+//         <rect x="5" y="5" width="8" height="8" rx="1" stroke="currentColor" stroke-width="1.5" fill="none"/>
+//         <rect x="3" y="3" width="8" height="8" rx="1" stroke="currentColor" stroke-width="1.5" fill="none"/>
+//       </svg>
+//       Copy URL
+//     </button>
 
-    <button onclick="(function(){const url='${escapedUrlForJs}';const link=document.createElement('a');link.href=url;link.download='golpo-video.mp4';link.style.display='none';document.body.appendChild(link);link.click();setTimeout(()=>document.body.removeChild(link),100)})()" style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; background: #FFFFFF; color: #2E7D32; border: 1px solid #A5D6A7; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='#F1F8E9'" onmouseout="this.style.background='#FFFFFF'">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M8 11V2M8 11L5 8M8 11L11 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M2 13H14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-      </svg>
-      Play Video
-    </button>
+//     <button onclick="(function(){const url='${escapedUrlForJs}';const link=document.createElement('a');link.href=url;link.download='golpo-video.mp4';link.style.display='none';document.body.appendChild(link);link.click();setTimeout(()=>document.body.removeChild(link),100)})()" style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; background: #FFFFFF; color: #2E7D32; border: 1px solid #A5D6A7; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='#F1F8E9'" onmouseout="this.style.background='#FFFFFF'">
+//       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+//         <path d="M8 11V2M8 11L5 8M8 11L11 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+//         <path d="M2 13H14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+//       </svg>
+//       Play Video
+//     </button>
 
     
-  </div>
-</div>
-<!-- GOLPO_AI_VIDEO_SECTION_END -->`;
-};
+//   </div>
+// </div>
+// <!-- GOLPO_AI_VIDEO_SECTION_END -->`;
+// };
 
 const buildCommentBodyHtml = (videoUrl) => {
   const safeUrl = escapeHtml(videoUrl || "");
