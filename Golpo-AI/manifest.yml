@@ -53,4 +53,5 @@ permissions:
       backend:
         - 'https://staging-api.golpoai.com/*'
         - 'https://golpo-stage-private.s3.us-east-2.amazonaws.com/*'
+        - 'https://generativelanguage.googleapis.com/*'
 
