@@ -456,9 +456,11 @@ const getPageIdFromUrl = () => {
       console.log("[GolpoAI] Could not get page ID from meta/data:", metaErr.message);
     }
 
-    console.warn("[GolpoAI] Could not extract page ID from URL or document");
+    // Only log as debug, not warning - this is a normal fallback scenario
+    console.log("[GolpoAI] Could not extract page ID from URL or document - will try other methods");
   } catch (e) {
-    console.warn("[GolpoAI] Error extracting page ID from URL:", e);
+    // Only log as debug, not warning - this is expected in some contexts
+    console.log("[GolpoAI] Error extracting page ID from URL (non-critical):", e.message);
   }
   return null;
 };
@@ -1416,57 +1418,120 @@ function App() {
       try {
         let pageInfo = null;
 
-        // For contentBylineItem, prioritize getContext() first
-        if (isBylineItem) {
+        // Use backend API as primary source - it has access to resolver context
+        // Also try getContext() to help backend if needed
+        let extractedPageId = null;
+        
+        // Try getContext() to help backend API (optional helper)
+        if (typeof getContext === 'function') {
           try {
-            console.log("[GolpoAI] fetchPageInfo: contentBylineItem - trying getContext()");
             const context = await getContext();
-            console.log("[GolpoAI] fetchPageInfo: getContext() result:", JSON.stringify(context, null, 2));
-            const pageId = extractPageIdFromContext(context);
-            if (pageId) {
-              pageInfo = {
-                id: pageId,
-                title: context.content?.title || context.extension?.content?.title || "Page",
-                type: context.content?.type || context.extension?.content?.type || "page"
-              };
-              console.log("[GolpoAI] fetchPageInfo: Got page info from getContext()", pageInfo);
-            } else {
-              console.warn("[GolpoAI] fetchPageInfo: getContext() returned but no page ID found, trying URL");
+            extractedPageId = extractPageIdFromContext(context);
+            if (extractedPageId) {
+              console.log("[GolpoAI] fetchPageInfo: Extracted page ID from getContext() to help backend:", extractedPageId);
             }
           } catch (contextErr) {
-            console.warn("[GolpoAI] fetchPageInfo: getContext() failed, trying URL:", contextErr);
+            // Non-critical, backend will try its own context
+            console.log("[GolpoAI] fetchPageInfo: getContext() not available, backend will use its context");
           }
-
-          // If getContext() didn't provide page ID, try URL parsing
-          if (!pageInfo || !pageInfo.id) {
-            const pageIdFromUrl = getPageIdFromUrl();
-            if (pageIdFromUrl) {
-              pageInfo = { id: pageIdFromUrl, title: "Page from URL", type: "page" };
-              console.log("[GolpoAI] fetchPageInfo: Got page info from URL", pageInfo);
+        }
+        
+        // Call backend API - it should extract page ID from resolver context
+        // Pass extracted page ID if available to help backend
+        try {
+          const payload = extractedPageId ? { pageId: extractedPageId } : {};
+          console.log("[GolpoAI] fetchPageInfo: Calling backend API getCurrentPage (attempt " + (retryCount + 1) + "/3)");
+          pageInfo = await safeInvoke("getCurrentPage", payload);
+          console.log("[GolpoAI] getCurrentPage response:", pageInfo);
+          
+          // Validate the response - backend API should always return valid page info
+          if (pageInfo && pageInfo.id && pageInfo.id !== "unknown" && pageInfo.id !== "current") {
+            console.log("[GolpoAI] fetchPageInfo: Successfully got page info from backend API:", pageInfo.id);
+          } else {
+            // Backend returned invalid response, retry
+            console.log("[GolpoAI] fetchPageInfo: Backend API returned invalid response, will retry");
+            pageInfo = null;
+            if (retryCount < 2) {
+              const delay = (retryCount + 1) * 1500; // 1.5s, 3s delays
+              console.log("[GolpoAI] Retrying backend API in " + delay + "ms...");
+              setTimeout(() => fetchPageInfo(retryCount + 1), delay);
+              return; // Exit early to retry
+            } else {
+              throw new Error("Backend API could not fetch page info after retries");
             }
           }
-        } else {
-          // For contentAction, try invoke first
+        } catch (invokeError) {
+          console.log("[GolpoAI] Backend API getCurrentPage failed (attempt " + (retryCount + 1) + "/3):", invokeError.message);
+          pageInfo = null;
+          
+          // Retry backend API
+          if (retryCount < 2) {
+            const delay = (retryCount + 1) * 1500; // 1.5s, 3s delays
+            console.log("[GolpoAI] Retrying backend API in " + delay + "ms...");
+            setTimeout(() => fetchPageInfo(retryCount + 1), delay);
+            return; // Exit early to retry
+          } else {
+            throw new Error("Backend API failed after retries: " + invokeError.message);
+          }
+        }
+        
+        // Old code path removed - now using backend API first for both module types
+        if (false) {
+          // For contentAction, prioritize backend API - try with longer timeout
           try {
-            pageInfo = await safeInvoke("getCurrentPage", {});
-            console.log("[GolpoAI] getCurrentPage response (attempt " + (retryCount + 1) + "):", pageInfo);
+            console.log("[GolpoAI] fetchPageInfo: Attempting backend API getCurrentPage (attempt " + (retryCount + 1) + "/3)");
+            // Use Promise.race with timeout to ensure we don't wait too long
+            const apiCall = safeInvoke("getCurrentPage", {});
+            const timeoutPromise = new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Backend API timeout')), 10000)
+            );
+            pageInfo = await Promise.race([apiCall, timeoutPromise]);
+            console.log("[GolpoAI] getCurrentPage response:", pageInfo);
+            
+            // Validate response
+            if (pageInfo && pageInfo.id && pageInfo.id !== "unknown" && pageInfo.id !== "current") {
+              console.log("[GolpoAI] fetchPageInfo: Successfully got valid page ID from backend API:", pageInfo.id);
+            } else {
+              console.log("[GolpoAI] fetchPageInfo: Backend API returned invalid page ID, will retry");
+              pageInfo = null;
+              throw new Error("Invalid page ID from backend API");
+            }
           } catch (invokeError) {
-            console.warn("[GolpoAI] invoke('getCurrentPage') failed, falling back to getContext():", invokeError);
-            // Fallback to getContext()
-            try {
-              const context = await getContext();
-              console.log("[GolpoAI] fetchPageInfo: getContext() result:", JSON.stringify(context, null, 2));
-              const pageId = extractPageIdFromContext(context);
-              if (pageId) {
-                pageInfo = {
-                  id: pageId,
-                  title: context.content?.title || context.extension?.content?.title || "Page",
-                  type: context.content?.type || context.extension?.content?.type || "page"
-                };
-                console.log("[GolpoAI] fetchPageInfo: Got page info from getContext()", pageInfo);
+            console.log("[GolpoAI] invoke('getCurrentPage') failed (attempt " + (retryCount + 1) + "), will retry:", invokeError.message);
+            pageInfo = null;
+            // Don't fall back immediately - retry backend API first
+            if (retryCount < 2) {
+              const delay = (retryCount + 1) * 1500; // 1.5s, 3s delays
+              console.log("[GolpoAI] Retrying backend API in " + delay + "ms...");
+              setTimeout(() => fetchPageInfo(retryCount + 1), delay);
+              return; // Exit early to retry
+            }
+            // Only fallback after all retries exhausted
+            console.log("[GolpoAI] All backend API retries exhausted, trying fallback methods");
+            // Fallback to getContext() - check if it's available first
+            if (typeof getContext === 'function') {
+              try {
+                const context = await getContext();
+                console.log("[GolpoAI] fetchPageInfo: getContext() result:", JSON.stringify(context, null, 2));
+                const pageId = extractPageIdFromContext(context);
+                if (pageId) {
+                  pageInfo = {
+                    id: pageId,
+                    title: context.content?.title || context.extension?.content?.title || "Page",
+                    type: context.content?.type || context.extension?.content?.type || "page"
+                  };
+                  console.log("[GolpoAI] fetchPageInfo: Got page info from getContext()", pageInfo);
+                }
+              } catch (contextErr) {
+                console.log("[GolpoAI] fetchPageInfo: getContext() failed, trying URL (non-critical):", contextErr.message);
+                const pageIdFromUrl = getPageIdFromUrl();
+                if (pageIdFromUrl) {
+                  pageInfo = { id: pageIdFromUrl, title: "Page from URL", type: "page" };
+                  console.log("[GolpoAI] fetchPageInfo: Got page info from URL", pageInfo);
+                }
               }
-            } catch (contextErr) {
-              console.warn("[GolpoAI] fetchPageInfo: getContext() failed, trying URL:", contextErr);
+            } else {
+              console.log("[GolpoAI] fetchPageInfo: getContext() is not available, trying URL");
               const pageIdFromUrl = getPageIdFromUrl();
               if (pageIdFromUrl) {
                 pageInfo = { id: pageIdFromUrl, title: "Page from URL", type: "page" };
@@ -1549,14 +1614,15 @@ function App() {
             }
           }
         } else {
-          console.warn("[GolpoAI] Page info not available or id is unknown:", pageInfo);
+          // Only log warning on last retry attempt, otherwise just debug log
+          if (retryCount >= 2) {
+            console.log("[GolpoAI] Page info not available after retries. Page ID will be fetched when Generate Video is clicked.");
+          } else {
+            console.log("[GolpoAI] Page info not yet available (attempt " + (retryCount + 1) + "/3), will retry...");
+          }
           // If no valid page info, clear any existing pages
           // Don't set error here - page might be available when user clicks Generate Video
           setPages([]);
-          // Only set error if we've exhausted all retries
-          if (retryCount >= 2) {
-            console.log("[GolpoAI] All retries exhausted, page ID will be fetched when Generate Video is clicked");
-          }
         }
       } catch (err) {
         console.error("[GolpoAI] Error fetching current page:", err);

@@ -148,37 +148,141 @@ const requestPageById = async (pageId) => {
 // });
 
 // Get current page information from the resolver context plus REST data
-resolver.define('getCurrentPage', async ({ context }) => {
+// Accepts optional pageId in payload (from frontend) or extracts from context
+resolver.define('getCurrentPage', async ({ context, payload }) => {
   try {
-  console.log('[resolver:getCurrentPage] context:', JSON.stringify({
-    hasExtension: !!context?.extension,
-    extensionType: context?.extension?.type,
-    hasContent: !!context?.extension?.content,
-    contentId: context?.extension?.content?.id,
-    contentTitle: context?.extension?.content?.title
-  }));
+    console.log('[resolver:getCurrentPage] Full context received:', JSON.stringify(context, null, 2));
+    console.log('[resolver:getCurrentPage] Payload received:', JSON.stringify(payload, null, 2));
+    
+    // First, check if pageId was provided in payload (from frontend)
+    let pageId = payload?.pageId || null;
+    let pageTitle = null;
+    let pageType = null;
+    
+    if (pageId && pageId !== 'unknown' && pageId !== 'current') {
+      console.log('[resolver:getCurrentPage] Using pageId from payload:', pageId);
+    } else {
+      // Try multiple paths to extract page ID from context
+      pageId = null;
+      
+      // Path 1: extension.content.id (most common for contentAction)
+      if (context?.extension?.content?.id) {
+        pageId = context.extension.content.id;
+        pageTitle = context.extension.content.title;
+        pageType = context.extension.content.type;
+        console.log('[resolver:getCurrentPage] Found page ID from extension.content:', pageId);
+      }
+    // Path 2: location.contentId (for contentBylineItem)
+    else if (context?.location?.contentId) {
+      pageId = context.location.contentId;
+      console.log('[resolver:getCurrentPage] Found page ID from location.contentId:', pageId);
+    }
+    // Path 2b: location.content.id (alternative location structure)
+    else if (context?.location?.content?.id) {
+      pageId = context.location.content.id;
+      pageTitle = context.location.content.title;
+      pageType = context.location.content.type;
+      console.log('[resolver:getCurrentPage] Found page ID from location.content.id:', pageId);
+    }
+    // Path 2c: Try location object directly
+    else if (context?.location?.id) {
+      pageId = context.location.id;
+      console.log('[resolver:getCurrentPage] Found page ID from location.id:', pageId);
+    }
+      // Path 3: content.id (direct content)
+      else if (context?.content?.id) {
+        pageId = context.content.id;
+        pageTitle = context.content.title;
+        pageType = context.content.type;
+        console.log('[resolver:getCurrentPage] Found page ID from content:', pageId);
+      }
+      // Path 4: extension.contentId (alternative structure)
+      else if (context?.extension?.contentId) {
+        pageId = context.extension.contentId;
+        console.log('[resolver:getCurrentPage] Found page ID from extension.contentId:', pageId);
+      }
+      // Path 5: Try to extract from any nested structure
+      else if (context) {
+        // Deep search for id fields
+        const searchForId = (obj, depth = 0) => {
+          if (depth > 3 || !obj || typeof obj !== 'object') return null;
+          if (obj.id && typeof obj.id === 'string' && obj.id.length > 0 && obj.id !== 'unknown' && obj.id !== 'current') {
+            return obj.id;
+          }
+          for (const key in obj) {
+            if (obj.hasOwnProperty(key) && typeof obj[key] === 'object') {
+              const found = searchForId(obj[key], depth + 1);
+              if (found) return found;
+            }
+          }
+          return null;
+        };
+        pageId = searchForId(context);
+        if (pageId) {
+          console.log('[resolver:getCurrentPage] Found page ID from deep search:', pageId);
+        }
+      }
+    }
 
-  const content = context?.extension?.content;
-
-  if (!content?.id) {
-    console.warn('[resolver:getCurrentPage] No content ID found in context');
+    // If still no page ID, try to get it from Confluence API using space and other context info
+    if (!pageId || pageId === 'unknown' || pageId === 'current') {
+      console.warn('[resolver:getCurrentPage] No valid page ID found in context or payload');
+      console.warn('[resolver:getCurrentPage] Context structure:', JSON.stringify(context, null, 2));
+      
+      // Try to extract space ID and use it to find pages (last resort)
+      const spaceId = context?.extension?.space?.id || 
+                      context?.space?.id || 
+                      context?.location?.spaceId ||
+                      context?.spaceId;
+      
+      if (spaceId) {
+        console.log('[resolver:getCurrentPage] Found space ID, attempting to get recent pages:', spaceId);
+        try {
+          // Try to get the most recent page from the space
+          const pagesResponse = await api.asUser().requestConfluence(
+            route`/wiki/api/v2/spaces/${spaceId}/pages?limit=1&sort=-lastModified`,
+            {
+              headers: {
+                Accept: 'application/json'
+              }
+            }
+          );
+          
+          if (pagesResponse.ok) {
+            const pagesData = await pagesResponse.json();
+            if (pagesData.results && pagesData.results.length > 0) {
+              pageId = pagesData.results[0].id;
+              console.log('[resolver:getCurrentPage] Found page ID from space pages:', pageId);
+            }
+          }
+        } catch (spaceError) {
+          console.warn('[resolver:getCurrentPage] Failed to get pages from space:', spaceError.message);
+        }
+      }
+      
+      // If still no page ID, return unknown
+      if (!pageId || pageId === 'unknown' || pageId === 'current') {
     return {
       id: 'unknown',
       title: 'Current Page',
-      type: 'page'
+          type: 'page',
+          needsPageId: true
     };
+      }
   }
 
+    // Try to fetch full page details from Confluence API
   try {
-    const { body } = await requestPageById(content.id);
+      const { body } = await requestPageById(pageId);
+      console.log('[resolver:getCurrentPage] Successfully fetched full page details from API');
     return body;
   } catch (error) {
-    console.error('[resolver:getCurrentPage] Failed to fetch default page data', error);
-      // Return fallback data instead of throwing
+      console.warn('[resolver:getCurrentPage] Failed to fetch full page data from API, returning basic info:', error.message);
+      // Return basic info from context if API call fails
     return {
-        id: content.id || 'unknown',
-        title: content.title || 'Current Page',
-        type: content.type || 'page'
+        id: pageId,
+        title: pageTitle || 'Current Page',
+        type: pageType || 'page'
       };
     }
   } catch (error) {
@@ -187,7 +291,8 @@ resolver.define('getCurrentPage', async ({ context }) => {
     return {
       id: 'unknown',
       title: 'Current Page',
-      type: 'page'
+      type: 'page',
+      needsPageId: true
     };
   }
 });
@@ -841,22 +946,22 @@ resolver.define('generateVideo', async ({ payload }) => {
 // Poll Golpo AI for video generation status by job id
 resolver.define('getVideoStatus', async ({ payload }) => {
   try {
-    const { jobId } = payload ?? {};
+  const { jobId } = payload ?? {};
 
     if (!jobId || typeof jobId !== 'string') {
-      throw new Error('Job id is required to check video status.');
-    }
+    throw new Error('Job id is required to check video status.');
+  }
 
-    const API_KEY = process.env.GOLPO_API_KEY || 'api-key';
+  const API_KEY = process.env.GOLPO_API_KEY || 'api-key';
 
-    if (!API_KEY || API_KEY === 'api-key') {
-      throw new Error('Golpo API key is not configured. Please set GOLPO_API_KEY environment variable.');
-    }
+  if (!API_KEY || API_KEY === 'api-key') {
+    throw new Error('Golpo API key is not configured. Please set GOLPO_API_KEY environment variable.');
+  }
 
-    const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
-    console.log('[resolver:getVideoStatus] Checking status for job', jobId, 'using', statusUrl);
+  const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
+  console.log('[resolver:getVideoStatus] Checking status for job', jobId, 'using', statusUrl);
 
-    try {
+  try {
     const response = await fetch(statusUrl, {
       method: 'GET',
       headers: {
@@ -878,11 +983,11 @@ resolver.define('getVideoStatus', async ({ payload }) => {
     const data = await response.json();
     console.log('[resolver:getVideoStatus] Status response:', JSON.stringify(data, null, 2));
 
-      return {
-        status: response.status,
-        statusText: response.statusText,
-        body: data
-      };
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      body: data
+    };
     } catch (innerError) {
       console.error('[resolver:getVideoStatus] Error calling Golpo AI status API:', innerError);
       throw innerError;
@@ -903,11 +1008,11 @@ resolver.define('getVideoStatus', async ({ payload }) => {
 // Fetch video file via backend to bypass CSP restrictions
 resolver.define('fetchVideoFile', async ({ payload }) => {
   try {
-    const { videoUrl } = payload ?? {};
+  const { videoUrl } = payload ?? {};
 
     if (!videoUrl || typeof videoUrl !== 'string') {
-      throw new Error('Video url is required to fetch media.');
-    }
+    throw new Error('Video url is required to fetch media.');
+  }
 
   console.log('[resolver:fetchVideoFile] Fetching video from:', videoUrl);
     const response = await fetch(videoUrl, {
@@ -1104,26 +1209,26 @@ resolver.define('fetchVideoFile', async ({ payload }) => {
 // Add video URL as a footer comment to the Confluence page
 resolver.define('addVideoCommentToPage', async ({ payload }) => {
   try {
-    const { pageId, videoUrl, commentBodyHtml } = payload ?? {};
+  const { pageId, videoUrl, commentBodyHtml } = payload ?? {};
 
     if (!pageId || typeof pageId !== 'string') {
-      throw new Error('Page id is required to add footer comment.');
-    }
+    throw new Error('Page id is required to add footer comment.');
+  }
 
     if (!videoUrl || typeof videoUrl !== 'string') {
-      throw new Error('Video URL is required to add footer comment.');
-    }
+    throw new Error('Video URL is required to add footer comment.');
+  }
 
     if (!commentBodyHtml || typeof commentBodyHtml !== 'string') {
-      throw new Error('Comment body HTML is required to add footer comment.');
-    }
+    throw new Error('Comment body HTML is required to add footer comment.');
+  }
 
-    // Use the comment body HTML provided by frontend
-    const commentBody = commentBodyHtml;
+  // Use the comment body HTML provided by frontend
+  const commentBody = commentBodyHtml;
 
-    console.log('[resolver:addVideoCommentToPage] Adding footer comment to page', pageId, 'with video URL:', videoUrl);
+  console.log('[resolver:addVideoCommentToPage] Adding footer comment to page', pageId, 'with video URL:', videoUrl);
 
-    try {
+  try {
     const response = await api.asUser().requestConfluence(
       route`/wiki/api/v2/footer-comments`,
       {
@@ -1142,21 +1247,21 @@ resolver.define('addVideoCommentToPage', async ({ payload }) => {
       }
     );
 
-      if (!response.ok) {
+    if (!response.ok) {
         let errorBody = 'Unable to read error body';
         try {
           errorBody = await response.text();
         } catch (e) {
           console.warn('[addVideoCommentToPage] Failed to read error body:', e);
         }
-        console.error('[resolver:addVideoCommentToPage] Failed to create footer comment', {
-          pageId,
-          status: response.status,
-          statusText: response.statusText,
+      console.error('[resolver:addVideoCommentToPage] Failed to create footer comment', {
+        pageId,
+        status: response.status,
+        statusText: response.statusText,
           errorBody: errorBody.substring(0, 500)
-        });
-        throw new Error(`Unable to add footer comment to page ${pageId}. Status: ${response.status} ${response.statusText}`);
-      }
+      });
+      throw new Error(`Unable to add footer comment to page ${pageId}. Status: ${response.status} ${response.statusText}`);
+    }
 
       let commentData;
       try {
@@ -1166,13 +1271,13 @@ resolver.define('addVideoCommentToPage', async ({ payload }) => {
         throw new Error(`Invalid response format from Confluence API`);
       }
       
-      console.log('[resolver:addVideoCommentToPage] Footer comment created successfully:', JSON.stringify(commentData, null, 2));
+    console.log('[resolver:addVideoCommentToPage] Footer comment created successfully:', JSON.stringify(commentData, null, 2));
 
-      return {
-        status: response.status,
-        statusText: response.statusText,
-        body: commentData
-      };
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      body: commentData
+    };
     } catch (innerError) {
       console.error('[resolver:addVideoCommentToPage] Error creating footer comment:', innerError);
       throw innerError;
@@ -1501,22 +1606,33 @@ resolver.define('pollVideoStatusBackground', async () => {
 // Export handler for resolver and scheduled trigger function
 const resolverDefinitions = resolver.getDefinitions();
 
+// Get the pollVideoStatusBackground function from resolver
+const pollVideoStatusBackgroundFunc = resolverDefinitions['pollVideoStatusBackground'];
+
+// Wrapper function for scheduled trigger
+const pollVideoStatusBackgroundWrapper = async ({ context }) => {
+  try {
+    console.log('[pollVideoStatusBackground] ========== SCHEDULED TRIGGER INVOKED ==========');
+    console.log('[pollVideoStatusBackground] Context:', JSON.stringify(context, null, 2));
+    console.log('[pollVideoStatusBackground] Timestamp:', new Date().toISOString());
+    
+    // Get the resolver function
+    const resolverFunc = resolverDefinitions['pollVideoStatusBackground'];
+    if (resolverFunc) {
+      return await resolverFunc({ context });
+    }
+    
+    // Fallback implementation if resolver not found
+    console.error('[pollVideoStatusBackground] Resolver function not found, using fallback');
+    return { error: 'Resolver function not found' };
+  } catch (error) {
+    console.error('[pollVideoStatusBackground] Error in scheduled trigger wrapper:', error);
+    return { error: error?.message || 'Unknown error in scheduled trigger' };
+  }
+};
+
 // Export handler for resolver (required by manifest.yml)
-module.exports.handler = resolverDefinitions;
+export const handler = resolverDefinitions;
 
 // Export function for scheduled trigger (required by manifest.yml)
-module.exports.pollVideoStatusBackground = async ({ context }) => {
-  console.log('[pollVideoStatusBackground] ========== SCHEDULED TRIGGER INVOKED ==========');
-  console.log('[pollVideoStatusBackground] Context:', JSON.stringify(context, null, 2));
-  console.log('[pollVideoStatusBackground] Timestamp:', new Date().toISOString());
-  
-  // Get the resolver function
-  const resolverFunc = resolverDefinitions['pollVideoStatusBackground'];
-  if (resolverFunc) {
-    return await resolverFunc({ context });
-  }
-  
-  // Fallback implementation if resolver not found
-  console.error('[pollVideoStatusBackground] Resolver function not found, using fallback');
-  return { error: 'Resolver function not found' };
-};
+export const pollVideoStatusBackground = pollVideoStatusBackgroundFunc || pollVideoStatusBackgroundWrapper;
