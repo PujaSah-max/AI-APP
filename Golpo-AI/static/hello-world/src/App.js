@@ -2033,6 +2033,17 @@ function App() {
       setVideoStatusMessage("Generating video...");
       console.log("[GolpoAI] Calling backend to generate video...");
 
+      // Extract documentText and create prompt (same as backend does)
+      const documentText = golpoAIDocument?.fullText || golpoAIDocument?.content || '';
+      const prompt = JSON.stringify({ content: documentText });
+      
+      // Log the prompt that will be sent to backend
+      console.log("[GolpoAI] ========== PROMPT FOR VIDEO GENERATION ==========");
+      console.log("[GolpoAI] Prompt (JSON string):", prompt);
+      console.log("[GolpoAI] Prompt (parsed):", JSON.parse(prompt));
+      console.log("[GolpoAI] Document text length:", documentText.length, "characters");
+      console.log("[GolpoAI] ========== END OF PROMPT ==========");
+
       // Call backend to generate video
       const response = await safeInvoke("generateVideo", {
         document: golpoAIDocument,

@@ -593,8 +593,8 @@ resolver.define('generateVideo', async ({ payload }) => {
   //   console.log('[resolver:generateVideo] ========== END OF ORIGINAL DOCUMENT ==========');
   // }
   
-  // Use the document in JSON format as the prompt for video generation
-  const prompt = JSON.stringify(document);
+  // Convert documentText to JSON format for video generation
+  const prompt = JSON.stringify({ content: documentText });
 
   // Extract values from videoSpecs
   const {
@@ -625,11 +625,10 @@ resolver.define('generateVideo', async ({ payload }) => {
     const bufferMultiplier = 1.3;
     const calculatedMinutes = (wordCount / wordsPerMinute) * bufferMultiplier;
     
-    // Round up to nearest 0.5 minutes and ensure minimum of 2 minutes
-    const roundedMinutes = Math.ceil(calculatedMinutes * 2) / 2;
-    const finalMinutes = Math.max(roundedMinutes, 2);
+    // Use exact calculated duration (no rounding)
+    const finalMinutes = calculatedMinutes;
     
-    console.log(`[resolver:generateVideo] Content has ${wordCount} words. Calculated duration: ${finalMinutes} minutes (base: ${calculatedMinutes.toFixed(2)} minutes)`);
+    console.log(`[resolver:generateVideo] Content has ${wordCount} words. Calculated duration: ${finalMinutes.toFixed(2)} minutes`);
     
     return finalMinutes;
   };
@@ -639,39 +638,27 @@ resolver.define('generateVideo', async ({ payload }) => {
   const calculatedDuration = calculateDurationFromContent(contentForDuration);
 
   // Map duration to timing value
-  // API requires minimum 2 minutes, so enforce that
-  const MINIMUM_DURATION_MINUTES = 2;
-  
-  // Use calculated duration if available, otherwise use user selection or default
-  let resolvedDuration = calculatedDuration;
-  
-  // If user specified a duration, use the larger of user selection or calculated duration
+  // Use user-selected duration if provided, otherwise use calculated duration
   const userSelectedDuration =
     parseDurationToMinutes(durationMinutes) ??
     parseDurationToMinutes(durationLabel) ??
     parseDurationToMinutes(duration);
   
-  if (userSelectedDuration !== null && userSelectedDuration > calculatedDuration) {
+  // Prioritize user selection over calculated duration
+  let resolvedDuration;
+  if (userSelectedDuration !== null) {
     resolvedDuration = userSelectedDuration;
-    console.log(`[resolver:generateVideo] Using user-selected duration: ${resolvedDuration} minutes (calculated was ${calculatedDuration} minutes)`);
+    console.log(`[resolver:generateVideo] Using user-selected duration: ${resolvedDuration} minutes${calculatedDuration ? ` (calculated was ${calculatedDuration} minutes)` : ''}`);
   } else if (calculatedDuration) {
     resolvedDuration = calculatedDuration;
     console.log(`[resolver:generateVideo] Using calculated duration: ${resolvedDuration} minutes`);
   } else {
-    resolvedDuration = userSelectedDuration ?? MINIMUM_DURATION_MINUTES;
+    // Fallback to 1 minute if nothing is provided
+    resolvedDuration = 1;
     console.log(`[resolver:generateVideo] Using fallback duration: ${resolvedDuration} minutes`);
   }
   
-  // Enforce minimum duration requirement
-  if (resolvedDuration < MINIMUM_DURATION_MINUTES) {
-    console.warn(`[resolver:generateVideo] Duration ${resolvedDuration} minutes is below minimum ${MINIMUM_DURATION_MINUTES} minutes. Using minimum.`);
-    resolvedDuration = MINIMUM_DURATION_MINUTES;
-  }
-  
-  // Add extra buffer to ensure we're always above API's estimated requirement
-  // Round up to next 0.5 minute increment to be safe
-  resolvedDuration = Math.ceil(resolvedDuration * 2) / 2;
-  
+  // Use exact user-selected duration (no rounding)
   console.log(`[resolver:generateVideo] Final resolved duration: ${resolvedDuration} minutes`);
   
   const timingValue = resolvedDuration.toString();
