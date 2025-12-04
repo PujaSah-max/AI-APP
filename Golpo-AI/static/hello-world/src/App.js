@@ -649,60 +649,61 @@ function App() {
 
   const maxChars = 500;
 
+  // COMMENTED OUT: Duration warning code - no longer needed
   // Calculate minimum required duration based on document length
   // Typical video narration: ~150-200 words per minute
   // Average word length: ~5 characters, so ~750-1000 characters per minute
-  const calculateMinimumDuration = useCallback((documentText) => {
-    if (!documentText || documentText.trim() === '') return 0;
-    
-    // Estimate words (rough approximation: split by spaces)
-    const wordCount = documentText.trim().split(/\s+/).length;
-    
-    // Use conservative estimate: 150 words per minute
-    const wordsPerMinute = 150;
-    const minimumMinutes = Math.ceil(wordCount / wordsPerMinute);
-    
-    return minimumMinutes;
-  }, []);
+  // const calculateMinimumDuration = useCallback((documentText) => {
+  //   if (!documentText || documentText.trim() === '') return 0;
+  //   
+  //   // Estimate words (rough approximation: split by spaces)
+  //   const wordCount = documentText.trim().split(/\s+/).length;
+  //   
+  //   // Use conservative estimate: 150 words per minute
+  //   const wordsPerMinute = 150;
+  //   const minimumMinutes = Math.ceil(wordCount / wordsPerMinute);
+  //   
+  //   return minimumMinutes;
+  // }, []);
 
-  // Check if selected duration is sufficient and show warning
-  const validateDuration = useCallback(() => {
-    if (!golpoAIDocument) {
-      setDurationWarning(null);
-      return true;
-    }
+  // COMMENTED OUT: Check if selected duration is sufficient and show warning
+  // const validateDuration = useCallback(() => {
+  //   if (!golpoAIDocument) {
+  //     setDurationWarning(null);
+  //     return true;
+  //   }
 
-    const documentText = golpoAIDocument?.fullText || golpoAIDocument?.content || '';
-    const minimumDuration = calculateMinimumDuration(documentText);
-    const selectedMinutes = selectedDurationOption.minutes;
+  //   const documentText = golpoAIDocument?.fullText || golpoAIDocument?.content || '';
+  //   const minimumDuration = calculateMinimumDuration(documentText);
+  //   const selectedMinutes = selectedDurationOption.minutes;
 
-    if (minimumDuration > 0 && selectedMinutes < minimumDuration) {
-      // Find suitable duration options from dropdown
-      const suitableOptions = durationOptions.filter(opt => opt.minutes >= minimumDuration);
-      const suggestedDurations = suitableOptions.length > 0 
-        ? suitableOptions.map(opt => opt.label).join(', ')
-        : durationOptions[durationOptions.length - 1].label; // Fallback to longest option
-      const warningMessage = `The selected duration (${selectedDurationOption.label}) may be too short for the document content. Estimated minimum duration: ${minimumDuration} minute${minimumDuration !== 1 ? 's' : ''}. Suggested duration${suitableOptions.length > 1 ? 's' : ''}: ${suggestedDurations}`;
-      
-      setDurationWarning({
-        type: 'warning',
-        message: warningMessage,
-        minimumDuration,
-        suggestedDurations: suitableOptions.length > 0 ? suitableOptions : [durationOptions[durationOptions.length - 1]]
-      });
-      return false;
-    } else {
-      setDurationWarning(null);
-      return true;
-    }
-  }, [golpoAIDocument, selectedDurationOption, calculateMinimumDuration]);
+  //   if (minimumDuration > 0 && selectedMinutes < minimumDuration) {
+  //     // Find suitable duration options from dropdown
+  //     const suitableOptions = durationOptions.filter(opt => opt.minutes >= minimumDuration);
+  //     const suggestedDurations = suitableOptions.length > 0 
+  //       ? suitableOptions.map(opt => opt.label).join(', ')
+  //       : durationOptions[durationOptions.length - 1].label; // Fallback to longest option
+  //     const warningMessage = `The selected duration (${selectedDurationOption.label}) may be too short for the document content. Estimated minimum duration: ${minimumDuration} minute${minimumDuration !== 1 ? 's' : ''}. Suggested duration${suitableOptions.length > 1 ? 's' : ''}: ${suggestedDurations}`;
+  //     
+  //     setDurationWarning({
+  //       type: 'warning',
+  //       message: warningMessage,
+  //       minimumDuration,
+  //       suggestedDurations: suitableOptions.length > 0 ? suitableOptions : [durationOptions[durationOptions.length - 1]]
+  //     });
+  //     return false;
+  //   } else {
+  //     setDurationWarning(null);
+  //     return true;
+  //   }
+  // }, [golpoAIDocument, selectedDurationOption, calculateMinimumDuration]);
 
-  // Validate duration when it changes or document is loaded
-  useEffect(() => {
-    if (golpoAIDocument) {
-      validateDuration();
-    }
-  }, [duration, golpoAIDocument, validateDuration]);
+  // COMMENTED OUT: Validate duration when it changes or document is loaded
+  // useEffect(() => {
+  //   if (golpoAIDocument) {
+  //     validateDuration();
+  //   }
+  // }, [duration, golpoAIDocument, validateDuration]);
   const videoStatusTimerRef = useRef(null);
   const previousLatestUrlRef = useRef(null);
   const completionCheckIntervalRef = useRef(null);
@@ -817,6 +818,13 @@ function App() {
     if (videoStatusTimerRef.current) {
       clearTimeout(videoStatusTimerRef.current);
       videoStatusTimerRef.current = null;
+    }
+  }, []);
+
+  const clearCompletionCheckInterval = useCallback(() => {
+    if (completionCheckIntervalRef.current) {
+      clearInterval(completionCheckIntervalRef.current);
+      completionCheckIntervalRef.current = null;
     }
   }, []);
 
@@ -1958,14 +1966,14 @@ function App() {
       return;
     }
 
-    // Validate duration before generating
-    const isValidDuration = validateDuration();
-    if (!isValidDuration && durationWarning) {
-      // Show error with warning message
-      setError(durationWarning.message);
-      console.warn("[GolpoAI] Duration validation failed:", durationWarning.message);
-      return;
-    }
+    // COMMENTED OUT: Validate duration before generating
+    // const isValidDuration = validateDuration();
+    // if (!isValidDuration && durationWarning) {
+    //   // Show error with warning message
+    //   setError(durationWarning.message);
+    //   console.warn("[GolpoAI] Duration validation failed:", durationWarning.message);
+    //   return;
+    // }
 
     setIsGeneratingVideo(true);
     setIsPollingVideoStatus(false);
@@ -1997,35 +2005,35 @@ function App() {
         selectedQuickAction: description || (selectedAction !== null ? quickActions[selectedAction] : null),
       };
 
-      // Step 1: Convert document to script using Gemini AI
-      const issueDocument = golpoAIDocument?.fullText || golpoAIDocument?.content || '';
-      let generatedScript = null;
+      // COMMENTED OUT: Step 1: Convert document to script using Gemini AI
+      // const issueDocument = golpoAIDocument?.fullText || golpoAIDocument?.content || '';
+      // let generatedScript = null;
 
-      if (issueDocument) {
-        try {
-          setVideoStatusMessage("Converting document to script via Gemini AI...");
-          console.log("[GolpoAI] Step 1: Converting issue document to script via Gemini AI...");
-          console.log("[GolpoAI] Document length:", issueDocument.length, "characters");
-          console.log("[GolpoAI] Description:", description || "None");
-          console.log("[GolpoAI] Video specs for script generation:", {
-            duration: selectedDurationOption.label,
-            language: language,
-          });
+      // if (issueDocument) {
+      //   try {
+      //     setVideoStatusMessage("Converting document to script via Gemini AI...");
+      //     console.log("[GolpoAI] Step 1: Converting issue document to script via Gemini AI...");
+      //     console.log("[GolpoAI] Document length:", issueDocument.length, "characters");
+      //     console.log("[GolpoAI] Description:", description || "None");
+      //     console.log("[GolpoAI] Video specs for script generation:", {
+      //       duration: selectedDurationOption.label,
+      //       language: language,
+      //     });
 
-          // Note: The conversion happens in the backend generateVideo resolver
-          // We log here to show the process has started
-          console.log("[GolpoAI] Sending document to backend for Gemini AI script conversion...");
-        } catch (geminiError) {
-          console.error("[GolpoAI] Failed to prepare script conversion:", geminiError);
-          // Continue with document if script generation fails
-        }
-      }
+      //     // Note: The conversion happens in the backend generateVideo resolver
+      //     // We log here to show the process has started
+      //     console.log("[GolpoAI] Sending document to backend for Gemini AI script conversion...");
+      //   } catch (geminiError) {
+      //     console.error("[GolpoAI] Failed to prepare script conversion:", geminiError);
+      //     // Continue with document if script generation fails
+      //   }
+      // }
 
-      // Step 2: Generate video with the script (conversion happens in backend)
-      setVideoStatusMessage("Generating video with script...");
-      console.log("[GolpoAI] Step 2: Calling backend to generate video (script conversion will happen server-side)...");
+      // COMMENTED OUT: Step 2: Generate video with the script (conversion happens in backend)
+      setVideoStatusMessage("Generating video...");
+      console.log("[GolpoAI] Calling backend to generate video...");
 
-      // Call backend to generate video (Gemini conversion happens inside this call)
+      // Call backend to generate video
       const response = await safeInvoke("generateVideo", {
         document: golpoAIDocument,
         videoSpecs: videoSpecs,
@@ -2034,13 +2042,13 @@ function App() {
 
       console.log("[GolpoAI] handleGenerateVideo: Video generation response received");
       
-      // Check if script was generated (backend logs will show this)
-      if (response?.body?.scriptGenerated) {
-        console.log("[GolpoAI] ✓ Script successfully generated via Gemini AI");
-        console.log("[GolpoAI] Script preview:", response.body.scriptPreview || "Available in backend logs");
-      } else {
-        console.log("[GolpoAI] Using document directly (script generation may have been skipped or failed)");
-      }
+      // COMMENTED OUT: Check if script was generated (backend logs will show this)
+      // if (response?.body?.scriptGenerated) {
+      //   console.log("[GolpoAI] ✓ Script successfully generated via Gemini AI");
+      //   console.log("[GolpoAI] Script preview:", response.body.scriptPreview || "Available in backend logs");
+      // } else {
+      //   console.log("[GolpoAI] Using document directly (script generation may have been skipped or failed)");
+      // }
 
       console.log("[GolpoAI] handleGenerateVideo: Video generation response:", response);
       const responseBody = response?.body || response;
@@ -2514,8 +2522,8 @@ function App() {
                   </div>
                 </div>
 
-                {/* Duration Warning - Horizontal layout spanning full width */}
-                {durationWarning && (
+                {/* COMMENTED OUT: Duration Warning - Horizontal layout spanning full width */}
+                {/* {durationWarning && (
                   <div style={{
                     marginTop: 12,
                     marginBottom: 12,
@@ -2591,7 +2599,7 @@ function App() {
                       </div>
                     )}
                   </div>
-                )}
+                )} */}
 
                 <div style={styles.formField}>
                   <label style={styles.formLabel}>Language</label>
