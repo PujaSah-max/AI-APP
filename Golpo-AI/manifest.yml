@@ -21,6 +21,13 @@ modules:
   function:
     - key: resolver
       handler: index.handler
+    - key: video-poll-func
+      handler: index.pollVideoStatusBackground
+      timeoutSeconds: 300
+  scheduledTrigger:
+    - key: video-poll-trigger
+      function: video-poll-func
+      interval: fiveMinute
 
 resources:
   - key: main
@@ -40,6 +47,7 @@ permissions:
     - write:page:confluence
     - read:comment:confluence
     - write:comment:confluence
+    - storage:app
   external:
     fetch:
       backend:

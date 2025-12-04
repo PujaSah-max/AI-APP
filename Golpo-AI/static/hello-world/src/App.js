@@ -634,6 +634,8 @@ function App() {
   const [videoStatusMessage, setVideoStatusMessage] = useState("");
   const [videoReadyInfo, setVideoReadyInfo] = useState(null);
   const [showVideoReadyModal, setShowVideoReadyModal] = useState(false);
+  const [showVideoCompletionModal, setShowVideoCompletionModal] = useState(false);
+  const [completedVideoUrl, setCompletedVideoUrl] = useState(null);
   const [copyUrlMessage, setCopyUrlMessage] = useState("");
   const [videoPlayerUrl, setVideoPlayerUrl] = useState(null);
   const [latestVideoUrl, setLatestVideoUrl] = useState(null);
@@ -700,6 +702,8 @@ function App() {
     }
   }, [duration, golpoAIDocument, validateDuration]);
   const videoStatusTimerRef = useRef(null);
+  const previousLatestUrlRef = useRef(null);
+  const completionCheckIntervalRef = useRef(null);
   const videoObjectUrlRef = useRef(null);
   const videoElementRef = useRef(null);
   const cleanupVideoObjectUrl = useCallback(() => {
@@ -978,9 +982,46 @@ function App() {
                 commentBodyHtml: commentBodyHtml
               });
               console.log("[GolpoAI] handleVideoReady: Successfully added video URL to footer comments");
+              
+              // Immediately fetch the latest comments to get the newest video URL
+              try {
+                // Small delay to ensure comment is saved
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                const footerResponse = await safeInvoke("getFooterComments", { pageId: pageId });
+                const latestComments = footerResponse?.body?.results || [];
+                
+                if (latestComments && latestComments.length > 0) {
+                  // Extract video URLs from the latest comments (newest first)
+                  const allUrls = extractAllVideoUrls(null, latestComments);
+                  
+                  if (allUrls.length > 0) {
+                    // Set the latest video URL from the newest comment (last one is newest)
+                    const latestUrl = allUrls[allUrls.length - 1];
+                    setLatestVideoUrl(latestUrl);
+                    setAllVideoUrls(allUrls);
+                    setCurrentVideoIndex(allUrls.length - 1);
+                    console.log("[GolpoAI] handleVideoReady: Latest video URL updated from newest comment:", latestUrl);
+                  } else {
+                    // Fallback: use the generated video URL directly
+                    setLatestVideoUrl(videoUrl);
+                    console.log("[GolpoAI] handleVideoReady: Using generated video URL directly:", videoUrl);
+                  }
+                } else {
+                  // Fallback: use the generated video URL directly
+                  setLatestVideoUrl(videoUrl);
+                  console.log("[GolpoAI] handleVideoReady: No comments found, using generated video URL directly:", videoUrl);
+                }
+              } catch (fetchError) {
+                // Fallback: use the generated video URL directly if fetch fails
+                console.warn("[GolpoAI] handleVideoReady: Failed to fetch latest comments, using generated video URL:", fetchError);
+                setLatestVideoUrl(videoUrl);
+              }
             } catch (commentError) {
               // Don't block the UI if comment creation fails - just log the error
               console.warn("[GolpoAI] handleVideoReady: Failed to add footer comment (non-blocking):", commentError);
+              // Still set the video URL directly even if comment creation fails
+              setLatestVideoUrl(videoUrl);
             }
           } else {
             console.warn("[GolpoAI] handleVideoReady: No valid page ID found, skipping video link addition");
@@ -993,7 +1034,7 @@ function App() {
         console.log("[GolpoAI] handleVideoReady: Skipping video link addition (contentBylineItem module)");
       }
     },
-    [clearVideoStatusTimer, videoJobId, prepareVideoSource, documentPayload, pages, golpoAIDocument, isBylineItem, safeInvoke]
+    [clearVideoStatusTimer, videoJobId, prepareVideoSource, documentPayload, pages, golpoAIDocument, isBylineItem, safeInvoke, extractAllVideoUrls]
   );
 
   const pollVideoStatus = useCallback(
@@ -1456,10 +1497,20 @@ function App() {
               const allUrls = extractAllVideoUrls(null, fetchedFooterComments);
               setAllVideoUrls(allUrls);
               if (allUrls.length > 0) {
-                // Set latest video URL from comments (first one)
-                setLatestVideoUrl(allUrls[0]);
-                setCurrentVideoIndex(0);
-                console.log("[GolpoAI] Latest video URL set from comments:", allUrls[0]);
+                // Set latest video URL from comments (last one is newest since comments are added at the end)
+                const latestUrl = allUrls[allUrls.length - 1];
+                setLatestVideoUrl(latestUrl);
+                setCurrentVideoIndex(allUrls.length - 1);
+                console.log("[GolpoAI] Latest video URL set from newest comment:", latestUrl);
+              }
+              
+              // Check for any pending video jobs and trigger background polling
+              // This ensures videos are processed even if user closed the tab
+              try {
+                await safeInvoke("pollVideoStatusBackground");
+                console.log("[GolpoAI] Background polling triggered on page load");
+              } catch (pollError) {
+                console.warn("[GolpoAI] Failed to trigger background polling:", pollError);
               }
               const mapped = toUiPage(fullPageInfo);
               if (mapped) {
@@ -1473,9 +1524,11 @@ function App() {
               const allUrls = extractAllVideoUrls(null, fetchedFooterComments);
               setAllVideoUrls(allUrls);
               if (allUrls.length > 0) {
-                setLatestVideoUrl(allUrls[0]);
-                setCurrentVideoIndex(0);
-                console.log("[GolpoAI] Latest video URL set from comments (fallback):", allUrls[0]);
+                // Set latest video URL from comments (last one is newest since comments are added at the end)
+                const latestUrl = allUrls[allUrls.length - 1];
+                setLatestVideoUrl(latestUrl);
+                setCurrentVideoIndex(allUrls.length - 1);
+                console.log("[GolpoAI] Latest video URL set from newest comment (fallback):", latestUrl);
               }
               
               const mapped = toUiPage(pageInfo);
@@ -1777,9 +1830,11 @@ function App() {
       const allUrls = extractAllVideoUrls(null, footerResult);
       setAllVideoUrls(allUrls);
       if (allUrls.length > 0) {
-        // Set latest video URL from comments (first one)
-        setLatestVideoUrl(allUrls[0]);
-        setCurrentVideoIndex(0);
+        // Set latest video URL from comments (last one is newest since comments are added at the end)
+        const latestUrl = allUrls[allUrls.length - 1];
+        setLatestVideoUrl(latestUrl);
+        setCurrentVideoIndex(allUrls.length - 1);
+        console.log("[GolpoAI] Latest video URL set from newest comment:", latestUrl);
       }
       const mapped = toUiPage(pageBody);
       if (mapped) {
@@ -1932,12 +1987,65 @@ function App() {
       // Close specs modal once request is accepted
       setIsModalOpen(false);
 
-      if (generatedJobId) {
-        console.log("[GolpoAI] handleGenerateVideo: Job id detected", generatedJobId);
-        startVideoStatusPolling(generatedJobId);
-      } else if (immediateVideoUrl) {
+      if (immediateVideoUrl) {
+        // Video is ready immediately, process it
         console.log("[GolpoAI] handleGenerateVideo: Video URL returned immediately");
         handleVideoReady(responseBody);
+      } else if (generatedJobId) {
+        // Job ID returned - backend will poll in background
+        console.log("[GolpoAI] handleGenerateVideo: Job id detected, backend will poll in background", generatedJobId);
+        setVideoJobId(generatedJobId);
+        // Keep loading state visible to show video is being generated
+        setIsGeneratingVideo(true);
+        setVideoStatusMessage("Status: Processing - Video generation in progress...");
+        
+        // Store current latest URL to detect when new video appears
+        previousLatestUrlRef.current = latestVideoUrl;
+        
+        // Start checking for completion periodically (every 30 seconds)
+        if (completionCheckIntervalRef.current) {
+          clearInterval(completionCheckIntervalRef.current);
+        }
+        completionCheckIntervalRef.current = setInterval(async () => {
+          try {
+            const pageId = documentPayload?.id || pages[0]?.id || golpoAIDocument?.pageId;
+            if (pageId && pageId !== "unknown" && pageId !== "current") {
+              const footerResponse = await safeInvoke("getFooterComments", { pageId: pageId });
+              const latestComments = footerResponse?.body?.results || [];
+              const allUrls = extractAllVideoUrls(null, latestComments);
+              
+              if (allUrls.length > 0) {
+                const newLatestUrl = allUrls[allUrls.length - 1];
+                const previousUrl = previousLatestUrlRef.current;
+                
+                // If we have a new video URL that's different from previous, show completion
+                if (newLatestUrl && newLatestUrl !== previousUrl && videoJobId) {
+                  console.log("[GolpoAI] New video detected! Showing completion popup");
+                  setLatestVideoUrl(newLatestUrl);
+                  setAllVideoUrls(allUrls);
+                  setCompletedVideoUrl(newLatestUrl);
+                  setShowVideoCompletionModal(true);
+                  setIsGeneratingVideo(false);
+                  setIsPollingVideoStatus(false);
+                  setVideoStatusMessage("");
+                  previousLatestUrlRef.current = newLatestUrl;
+                  
+                  // Clear the interval
+                  if (completionCheckIntervalRef.current) {
+                    clearInterval(completionCheckIntervalRef.current);
+                    completionCheckIntervalRef.current = null;
+                  }
+                } else {
+                  // Update latest URL but don't show completion yet
+                  setLatestVideoUrl(newLatestUrl);
+                  setAllVideoUrls(allUrls);
+                }
+              }
+            }
+          } catch (checkError) {
+            console.warn("[GolpoAI] Error checking for video completion:", checkError);
+          }
+        }, 30000); // Check every 30 seconds
       } else {
         console.warn("[GolpoAI] handleGenerateVideo: No job id or video URL returned, showing raw response");
         handleVideoReady(responseBody);
@@ -2502,6 +2610,28 @@ function App() {
       {(isGeneratingVideo || isPollingVideoStatus) && (
         <div style={styles.loadingOverlay}>
           <div style={styles.loadingCard}>
+            <button
+              onClick={() => {
+                setIsGeneratingVideo(false);
+                setIsPollingVideoStatus(false);
+                setVideoStatusMessage("");
+                clearCompletionCheckInterval();
+              }}
+              style={styles.loadingCloseButton}
+              title="Close"
+              onMouseEnter={(e) => {
+                e.target.style.color = "#1e293b";
+                e.target.style.background = "#e2e8f0";
+                e.target.style.borderColor = "#cbd5e1";
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.color = "#475569";
+                e.target.style.background = "#f8fafc";
+                e.target.style.borderColor = "#e2e8f0";
+              }}
+            >
+              ×
+            </button>
             <div style={styles.loadingSpinner} />
             
             <h3 style={styles.loadingTitle}>Generating your Golpo video</h3>
@@ -2512,9 +2642,89 @@ function App() {
               <p style={styles.loadingJobId}>Job ID: {videoJobId}</p>
             )}
             <p style={styles.loadingSubtext}>
-              This usually takes some time. You can keep this window open.
-              Video will be saved on page and in the comments section after completion.
+              {videoJobId ? (
+                <>
+                  Video generation may take some time (usually 5-10 minutes).
+                  <br />
+                  <strong>You can close this window - the video will be saved in page comments when ready!</strong>
+                </>
+              ) : (
+                <>
+                  Video generation may take some time.
+                  <br />
+                  You can close this window - the video will be saved in page comments when ready.
+                </>
+              )}
             </p>
+          </div>
+        </div>
+      )}
+
+      {showVideoCompletionModal && completedVideoUrl && (
+        <div style={styles.videoReadyOverlay}>
+          <div style={styles.videoReadyCard}>
+            <button
+              onClick={() => {
+                setShowVideoCompletionModal(false);
+                setCompletedVideoUrl(null);
+                clearCompletionCheckInterval();
+              }}
+              style={styles.modalCloseButton}
+              title="Close"
+              onMouseEnter={(e) => {
+                e.target.style.background = "#f1f5f9";
+                e.target.style.color = "#334155";
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.background = "transparent";
+                e.target.style.color = "#64748b";
+              }}
+            >
+              ×
+            </button>
+            <div style={styles.modalHeader}>
+              <div style={styles.modalIconWrapper}>
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
+                  <rect x="2" y="4" width="14" height="12" rx="3" stroke="#FF4D6D" strokeWidth="2" />
+                  <path
+                    d="M16 10L21 6V18L16 14"
+                    stroke="#FF4D6D"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </div>
+              <h2 style={styles.modalTitle}>Video Generation Complete!</h2>
+            </div>
+            <div style={styles.modalBody}>
+              <p style={{ marginBottom: 16, color: "#475569" }}>
+                Your video has been generated and saved in the page comments.
+              </p>
+              <div style={{ background: "#f8f5ff", padding: 12, borderRadius: 8, marginBottom: 16 }}>
+                <p style={{ margin: 0, fontSize: 12, color: "#3b2d71", wordBreak: "break-all" }}>
+                  {completedVideoUrl}
+                </p>
+              </div>
+              <div style={styles.modalActions}>
+                <button
+                  style={styles.modalPrimaryButton}
+                  onClick={() => {
+                    handleCopyVideoUrl(completedVideoUrl);
+                  }}
+                >
+                  Copy URL
+                </button>
+                <button
+                  style={styles.modalSecondaryButton}
+                  onClick={() => {
+                    window.open(completedVideoUrl, '_blank');
+                  }}
+                >
+                  Open Video
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -2614,8 +2824,9 @@ function App() {
                      }
                      
                      setAllVideoUrls(allUrls);
-                     const recentVideoUrl = allUrls[0]; // Use first video (most recent)
-                     setCurrentVideoIndex(0);
+                     // Use last video (newest since comments are added at the end)
+                     const recentVideoUrl = allUrls[allUrls.length - 1];
+                     setCurrentVideoIndex(allUrls.length - 1);
                      
                      // Set up video ready info and show video preview modal
                      const normalizedInfo = {
@@ -3244,6 +3455,34 @@ const styles = {
     paddingTop: 20,
     borderTop: "1px solid #e2e8f0",
   },
+  modalActions: {
+    display: "flex",
+    justifyContent: "flex-end",
+    gap: 12,
+    marginTop: 20,
+  },
+  modalPrimaryButton: {
+    padding: "10px 20px",
+    borderRadius: 10,
+    border: "none",
+    background: "linear-gradient(120deg, #2B1F35 0%, #FF4D6D 100%)",
+    color: "#fff",
+    fontWeight: 600,
+    cursor: "pointer",
+    fontSize: 14,
+    transition: "all 0.2s",
+  },
+  modalSecondaryButton: {
+    padding: "10px 20px",
+    borderRadius: 10,
+    border: "1px solid #e2e8f0",
+    background: "#fff",
+    color: "#3b2d71",
+    fontWeight: 600,
+    cursor: "pointer",
+    fontSize: 14,
+    transition: "all 0.2s",
+  },
   modalCancelButton: {
     padding: "10px 20px",
     background: "#fff",
@@ -3311,6 +3550,7 @@ const styles = {
     flexDirection: "column",
     alignItems: "center",
     border: "1px solid #e5e7eb",
+    position: "relative",
   },
   loadingSpinner: {
     width: 36,
@@ -3326,6 +3566,51 @@ const styles = {
   loadingMessage: { marginTop: 12, fontSize: 15, color: "#000", fontWeight: 600, minHeight: "20px" },
   loadingJobId: { marginTop: 8, fontSize: 13, color: "#475569", opacity: 0.9, fontWeight: 700 },
   loadingSubtext: { marginTop: 12, fontSize: 12, color: "#475569", opacity: 0.8, fontWeight: 700 },
+  loadingCloseButton: {
+    position: "absolute",
+    top: 12,
+    right: 12,
+    background: "#f8fafc",
+    border: "1px solid #e2e8f0",
+    fontSize: 24,
+    color: "#475569",
+    cursor: "pointer",
+    width: 32,
+    height: 32,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: "50%",
+    transition: "all 0.2s",
+    lineHeight: 1,
+    padding: 0,
+    fontWeight: 400,
+    zIndex: 1000,
+    boxShadow: "0 2px 4px rgba(0,0,0,0.1)",
+  },
+  loadingCloseButtonHover: {
+    background: "#f1f5f9",
+    color: "#334155",
+  },
+  modalCloseButton: {
+    position: "absolute",
+    top: 16,
+    right: 16,
+    background: "transparent",
+    border: "none",
+    fontSize: 28,
+    color: "#64748b",
+    cursor: "pointer",
+    width: 32,
+    height: 32,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: "50%",
+    transition: "all 0.2s",
+    lineHeight: 1,
+    padding: 0,
+  },
   videoReadyOverlay: {
     position: "fixed",
     top: 0,
@@ -3430,14 +3715,14 @@ const styles = {
   },
   copyUrlToast: {
     marginTop: 12,
-    background: "#10b981",
-    color: "#fff",
-    padding: "10px 16px",
-    borderRadius: 10,
-    fontWeight: 600,
+    background: "transparent",
+    color: "#3b2d71",
+    padding: "8px 12px",
+    borderRadius: 8,
+    fontWeight: 500,
     textAlign: "center",
     width: "100%",
-    boxShadow: "0 6px 20px rgba(16, 185, 129, 0.35)",
+    fontSize: 14,
   },
   videoReadyPrimaryButton: {
     flex: 1,

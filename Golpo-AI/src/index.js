@@ -1,5 +1,5 @@
 import Resolver from '@forge/resolver';
-import api, { route } from '@forge/api';
+import api, { route, storage } from '@forge/api';
 
 const resolver = new Resolver();
 
@@ -425,12 +425,71 @@ resolver.define('generateVideo', async ({ payload }) => {
     selectedQuickAction = null,
   } = videoSpecs || {};
 
+  // Calculate estimated duration based on content length
+  // Average reading speed for video narration: ~150-180 words per minute
+  // We'll use 150 words/min as a conservative estimate and add 30% buffer
+  const calculateDurationFromContent = (content) => {
+    if (!content || typeof content !== 'string') return null;
+    
+    // Count words (split by whitespace and filter empty strings)
+    const words = content.trim().split(/\s+/).filter(word => word.length > 0);
+    const wordCount = words.length;
+    
+    // Calculate duration: words / words_per_minute * buffer
+    // Using 150 words/min as base, with 1.3x buffer (30% extra)
+    const wordsPerMinute = 150;
+    const bufferMultiplier = 1.3;
+    const calculatedMinutes = (wordCount / wordsPerMinute) * bufferMultiplier;
+    
+    // Round up to nearest 0.5 minutes and ensure minimum of 2 minutes
+    const roundedMinutes = Math.ceil(calculatedMinutes * 2) / 2;
+    const finalMinutes = Math.max(roundedMinutes, 2);
+    
+    console.log(`[resolver:generateVideo] Content has ${wordCount} words. Calculated duration: ${finalMinutes} minutes (base: ${calculatedMinutes.toFixed(2)} minutes)`);
+    
+    return finalMinutes;
+  };
+
+  // Get content for duration calculation
+  const contentForDuration = document?.fullText || document?.content || prompt || description || '';
+  const calculatedDuration = calculateDurationFromContent(contentForDuration);
+  
   // Map duration to timing value
-  const resolvedDuration =
+  // API requires minimum 2 minutes, so enforce that
+  const MINIMUM_DURATION_MINUTES = 2;
+  
+  // Use calculated duration if available, otherwise use user selection or default
+  let resolvedDuration = calculatedDuration;
+  
+  // If user specified a duration, use the larger of user selection or calculated duration
+  const userSelectedDuration =
     parseDurationToMinutes(durationMinutes) ??
     parseDurationToMinutes(durationLabel) ??
-    parseDurationToMinutes(duration) ??
-    1;
+    parseDurationToMinutes(duration);
+  
+  if (userSelectedDuration !== null && userSelectedDuration > calculatedDuration) {
+    resolvedDuration = userSelectedDuration;
+    console.log(`[resolver:generateVideo] Using user-selected duration: ${resolvedDuration} minutes (calculated was ${calculatedDuration} minutes)`);
+  } else if (calculatedDuration) {
+    resolvedDuration = calculatedDuration;
+    console.log(`[resolver:generateVideo] Using calculated duration: ${resolvedDuration} minutes`);
+  } else {
+    resolvedDuration = userSelectedDuration ?? MINIMUM_DURATION_MINUTES;
+    console.log(`[resolver:generateVideo] Using fallback duration: ${resolvedDuration} minutes`);
+  }
+  
+  // Enforce minimum duration requirement
+  if (resolvedDuration < MINIMUM_DURATION_MINUTES) {
+    console.warn(`[resolver:generateVideo] Duration ${resolvedDuration} minutes is below minimum ${MINIMUM_DURATION_MINUTES} minutes. Using minimum.`);
+    resolvedDuration = MINIMUM_DURATION_MINUTES;
+  }
+  
+  // Add extra buffer to ensure we're always above API's estimated requirement
+  // Round up to next 0.5 minute increment to be safe
+  resolvedDuration = Math.ceil(resolvedDuration * 2) / 2;
+  
+  console.log(`[resolver:generateVideo] Final resolved duration: ${resolvedDuration} minutes`);
+  
   const timingValue = resolvedDuration.toString();
   const videoType = 'long';
 
@@ -568,18 +627,84 @@ resolver.define('generateVideo', async ({ payload }) => {
 
     if (!response.ok) {
       const errorBody = await response.text();
+      let errorMessage = `Golpo AI API error: ${response.status} ${response.statusText}`;
+      
+      // Try to parse error body for more details
+      try {
+        const errorJson = JSON.parse(errorBody);
+        if (errorJson.detail) {
+          errorMessage += `. ${errorJson.detail}`;
+        } else if (errorJson.message) {
+          errorMessage += `. ${errorJson.message}`;
+        } else {
+          errorMessage += `. ${errorBody}`;
+        }
+      } catch (e) {
+        errorMessage += `. ${errorBody}`;
+      }
+      
       console.error('[resolver:generateVideo] Golpo AI API error', {
         status: response.status,
         statusText: response.statusText,
-        errorBody
+        errorBody,
+        errorMessage
       });
-      throw new Error(`Golpo AI API error: ${response.status} ${response.statusText}. ${errorBody}`);
+      
+      throw new Error(errorMessage);
     }
 
     const data = await response.json();
     console.log('[resolver:generateVideo] Step 2: Golpo AI API response received');
     console.log('[resolver:generateVideo] Golpo AI API response:', JSON.stringify(data, null, 2));
 
+    // Extract jobId and pageId from response/document
+    const jobId = data?.job_id || data?.jobId || data?.id || data?.data?.job_id || data?.data?.jobId;
+    const pageId = document?.pageId || document?.metadata?.pageId;
+
+    // If we have a jobId and pageId, store job info in Forge storage for background polling
+    if (jobId && pageId) {
+      try {
+        const jobKey = `video-job-${jobId}`;
+        const jobData = {
+          jobId,
+          pageId,
+          createdAt: new Date().toISOString(),
+          status: 'processing',
+          document: {
+            pageId: document.pageId,
+            title: document.title
+          }
+        };
+        
+        await storage.set(jobKey, jobData);
+        console.log('[resolver:generateVideo] ✅ Stored job info in storage:', jobKey);
+        console.log('[resolver:generateVideo] Job data:', JSON.stringify(jobData, null, 2));
+        
+        // Also add to a list of active jobs for the scheduled trigger to process
+        const activeJobsKey = 'active-video-jobs';
+        try {
+          const activeJobs = await storage.get(activeJobsKey) || [];
+          if (!activeJobs.includes(jobId)) {
+            activeJobs.push(jobId);
+            await storage.set(activeJobsKey, activeJobs);
+            console.log('[resolver:generateVideo] ✅ Added job to active jobs list. Total active jobs:', activeJobs.length);
+            console.log('[resolver:generateVideo] Active jobs:', activeJobs);
+          } else {
+            console.log('[resolver:generateVideo] Job already in active jobs list');
+          }
+        } catch (listError) {
+          console.error('[resolver:generateVideo] ❌ Failed to update active jobs list:', listError);
+          // Continue even if this fails
+        }
+      } catch (storageError) {
+        console.error('[resolver:generateVideo] ❌ Failed to store job info in storage:', storageError);
+        console.error('[resolver:generateVideo] Storage error details:', JSON.stringify(storageError, null, 2));
+        // Continue even if storage fails - don't break the response
+      }
+    } else {
+      console.warn('[resolver:generateVideo] ⚠️ Missing jobId or pageId - cannot store for background processing');
+      console.warn('[resolver:generateVideo] jobId:', jobId, 'pageId:', pageId);
+    }
     // Include script generation info in response for frontend logging
     const responseBody = {
       ...data,
@@ -915,4 +1040,411 @@ resolver.define('addVideoCommentToPage', async ({ payload }) => {
   }
 });
 
+// Helper function to extract video URL from status response
+// This matches the frontend extractVideoUrlFromPayload logic
+const extractVideoUrlFromStatus = (statusData) => {
+  if (!statusData) {
+    return null;
+  }
+  
+  // Try paths in the same order as frontend extractVideoUrlFromPayload
+  const possiblePaths = [
+    statusData.video_url,
+    statusData.download_url,
+    statusData.podcast_url,
+    statusData?.data?.video_url,
+    statusData?.data?.download_url,
+    statusData?.data?.podcast_url,
+    statusData?.result?.video_url,
+    // Additional paths for different response formats
+    statusData.videoUrl,
+    statusData.downloadUrl,
+    statusData.podcastUrl,
+    statusData?.data?.videoUrl,
+    statusData?.data?.downloadUrl,
+    statusData?.data?.podcastUrl,
+    statusData?.result?.videoUrl,
+    statusData?.result?.download_url,
+    statusData?.result?.downloadUrl,
+    statusData.url,
+    statusData?.data?.url,
+    statusData?.result?.url,
+  ];
+  
+  // Find first valid URL (must be a string and contain http or .mp4)
+  for (const url of possiblePaths) {
+    if (url && typeof url === 'string' && (url.includes('http') || url.includes('.mp4'))) {
+      console.log('[extractVideoUrlFromStatus] ✅ Found video URL:', url);
+      return url;
+    }
+  }
+  
+  // Log the full response structure for debugging
+  console.warn('[extractVideoUrlFromStatus] ⚠️ No video URL found in response');
+  console.warn('[extractVideoUrlFromStatus] Response keys:', Object.keys(statusData || {}));
+  if (statusData?.data) {
+    console.warn('[extractVideoUrlFromStatus] Response.data keys:', Object.keys(statusData.data || {}));
+  }
+  console.warn('[extractVideoUrlFromStatus] Full structure:', JSON.stringify(statusData, null, 2));
+  return null;
+};
+
+// Helper function to check if video is ready
+const isVideoReady = (statusData) => {
+  const status = statusData?.status || statusData?.data?.status || '';
+  const statusLower = status.toLowerCase();
+  return statusLower === 'completed' || 
+         statusLower === 'ready' || 
+         statusLower === 'success' || 
+         statusLower === 'finished' || 
+         statusLower === 'done' ||
+         statusLower === 'complete';
+};
+
+// Helper function to check if video generation failed
+const isVideoFailed = (statusData) => {
+  const status = statusData?.status || statusData?.data?.status || '';
+  const statusLower = status.toLowerCase();
+  return statusLower === 'failed' || 
+         statusLower === 'error' || 
+         statusLower === 'cancelled' || 
+         statusLower === 'denied' || 
+         statusLower === 'rejected';
+};
+
+// Helper function to build comment HTML for video URL
+const buildCommentBodyHtml = (videoUrl) => {
+  return `<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>`;
+};
+
+// Helper function to build video section HTML for page content
+const buildVideoSectionHtml = (videoUrl) => {
+  return `<h2>Golpo AI Generated Video</h2><p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>`;
+};
+
+// Process completed video: add to comments only (not page content)
+// Use asApp() for scheduled triggers (no user context), asUser() for resolver calls
+const processCompletedVideo = async (jobId, videoUrl, pageId, useAsApp = false) => {
+  try {
+    console.log('[processCompletedVideo] Processing completed video:', { jobId, videoUrl, pageId, useAsApp });
+    
+    const commentBodyHtml = buildCommentBodyHtml(videoUrl);
+
+    // Use asApp() for scheduled triggers, asUser() for resolver calls
+    const apiCall = useAsApp ? api.asApp() : api.asUser();
+
+    // Add video as footer comment only (not to page content)
+    try {
+      const commentResponse = await apiCall.requestConfluence(
+        route`/wiki/api/v2/footer-comments`,
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            pageId,
+            body: {
+              representation: 'storage',
+              value: commentBodyHtml
+            }
+          })
+        }
+      );
+      
+      if (commentResponse.ok) {
+        const commentData = await commentResponse.json();
+        console.log('[processCompletedVideo] Successfully added video to footer comments:', JSON.stringify(commentData, null, 2));
+      } else {
+        const errorText = await commentResponse.text();
+        console.error('[processCompletedVideo] Failed to add footer comment:', commentResponse.status, errorText);
+      }
+    } catch (commentError) {
+      console.error('[processCompletedVideo] Failed to add footer comment:', commentError);
+    }
+
+    // Remove job from storage and active jobs list
+    try {
+      const jobKey = `video-job-${jobId}`;
+      await storage.delete(jobKey);
+      
+      const activeJobsKey = 'active-video-jobs';
+      const activeJobs = await storage.get(activeJobsKey) || [];
+      const updatedJobs = activeJobs.filter(id => id !== jobId);
+      await storage.set(activeJobsKey, updatedJobs);
+      
+      console.log('[processCompletedVideo] Removed job from storage:', jobId);
+    } catch (cleanupError) {
+      console.warn('[processCompletedVideo] Failed to cleanup job storage:', cleanupError);
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('[processCompletedVideo] Error processing completed video:', error);
+    throw error;
+  }
+};
+
+// Web trigger function to poll video status in background
+resolver.define('pollVideoStatusBackground', async () => {
+  console.log('[pollVideoStatusBackground] Starting background polling');
+  
+  const API_KEY = process.env.GOLPO_API_KEY || 'api-key';
+  if (!API_KEY || API_KEY === 'api-key') {
+    console.error('[pollVideoStatusBackground] Golpo API key not configured');
+    return { error: 'API key not configured' };
+  }
+
+  try {
+    // Get list of active jobs
+    const activeJobsKey = 'active-video-jobs';
+    const activeJobs = await storage.get(activeJobsKey) || [];
+    
+    if (activeJobs.length === 0) {
+      console.log('[pollVideoStatusBackground] No active jobs to poll');
+      return { message: 'No active jobs', processed: 0 };
+    }
+
+    console.log('[pollVideoStatusBackground] Found active jobs:', activeJobs.length);
+
+    let processed = 0;
+    let completed = 0;
+    let failed = 0;
+    const remainingJobs = [];
+
+    // Poll each active job
+    for (const jobId of activeJobs) {
+      try {
+        const jobKey = `video-job-${jobId}`;
+        const jobData = await storage.get(jobKey);
+        
+        if (!jobData) {
+          console.warn('[pollVideoStatusBackground] Job data not found for:', jobId);
+          continue;
+        }
+
+        const { pageId } = jobData;
+        if (!pageId) {
+          console.warn('[pollVideoStatusBackground] Page ID missing for job:', jobId);
+          continue;
+        }
+
+        // Check video status
+        const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
+        const response = await fetch(statusUrl, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': API_KEY
+          }
+        });
+
+        if (!response.ok) {
+          console.warn('[pollVideoStatusBackground] Status check failed for job:', jobId, response.status);
+          remainingJobs.push(jobId);
+          continue;
+        }
+
+        const statusData = await response.json();
+        processed++;
+
+        // Check if video is ready
+        if (isVideoReady(statusData)) {
+          console.log('[pollVideoStatusBackground] Video status is ready for job:', jobId);
+          console.log('[pollVideoStatusBackground] Full status response:', JSON.stringify(statusData, null, 2));
+          
+          const videoUrl = extractVideoUrlFromStatus(statusData);
+          if (videoUrl) {
+            console.log('[pollVideoStatusBackground] ✅ Video ready for job:', jobId);
+            console.log('[pollVideoStatusBackground] Video URL:', videoUrl);
+            console.log('[pollVideoStatusBackground] Processing completed video...');
+            // Use asApp() since this is called from scheduled trigger (no user context)
+            await processCompletedVideo(jobId, videoUrl, pageId, true);
+            console.log('[pollVideoStatusBackground] ✅ Successfully processed completed video for job:', jobId);
+            completed++;
+          } else {
+            console.warn('[pollVideoStatusBackground] ⚠️ Video ready but no URL found for job:', jobId);
+            console.warn('[pollVideoStatusBackground] Status data structure:', JSON.stringify(statusData, null, 2));
+            // Keep job in list to retry - maybe URL will appear in next poll
+            remainingJobs.push(jobId);
+          }
+        } else if (isVideoFailed(statusData)) {
+          console.log('[pollVideoStatusBackground] Video generation failed for job:', jobId);
+          // Remove failed job from storage
+          try {
+            await storage.delete(jobKey);
+            const updatedJobs = activeJobs.filter(id => id !== jobId);
+            await storage.set(activeJobsKey, updatedJobs);
+          } catch (cleanupError) {
+            console.warn('[pollVideoStatusBackground] Failed to cleanup failed job:', cleanupError);
+          }
+          failed++;
+        } else {
+          // Still processing, keep in list
+          const currentStatus = statusData?.status || statusData?.data?.status || 'unknown';
+          console.log('[pollVideoStatusBackground] ⏳ Job still processing:', jobId, 'Status:', currentStatus);
+          remainingJobs.push(jobId);
+        }
+      } catch (jobError) {
+        console.error('[pollVideoStatusBackground] Error processing job:', jobId, jobError);
+        remainingJobs.push(jobId);
+      }
+    }
+
+    // Update active jobs list
+    await storage.set(activeJobsKey, remainingJobs);
+
+    console.log('[pollVideoStatusBackground] Polling complete:', {
+      processed,
+      completed,
+      failed,
+      remaining: remainingJobs.length
+    });
+
+    return {
+      processed,
+      completed,
+      failed,
+      remaining: remainingJobs.length
+    };
+  } catch (error) {
+    console.error('[pollVideoStatusBackground] Error in background polling:', error);
+    return { error: error.message };
+  }
+});
+
+// Export handler for resolver
 export const handler = resolver.getDefinitions();
+
+// Export function for scheduled trigger
+export const pollVideoStatusBackground = async ({ context }) => {
+  console.log('[pollVideoStatusBackground] ========== SCHEDULED TRIGGER INVOKED ==========');
+  console.log('[pollVideoStatusBackground] Context:', JSON.stringify(context, null, 2));
+  console.log('[pollVideoStatusBackground] Timestamp:', new Date().toISOString());
+  
+  const API_KEY = process.env.GOLPO_API_KEY || 'api-key';
+  if (!API_KEY || API_KEY === 'api-key') {
+    console.error('[pollVideoStatusBackground] ❌ Golpo API key not configured');
+    return { error: 'API key not configured' };
+  }
+
+  try {
+    // Get list of active jobs
+    const activeJobsKey = 'active-video-jobs';
+    const activeJobs = await storage.get(activeJobsKey) || [];
+    
+    if (activeJobs.length === 0) {
+      console.log('[pollVideoStatusBackground] ℹ️ No active jobs to poll');
+      return { message: 'No active jobs', processed: 0 };
+    }
+
+    console.log('[pollVideoStatusBackground] ✅ Found', activeJobs.length, 'active job(s):', activeJobs);
+
+    let processed = 0;
+    let completed = 0;
+    let failed = 0;
+    const remainingJobs = [];
+
+    // Poll each active job
+    for (const jobId of activeJobs) {
+      try {
+        const jobKey = `video-job-${jobId}`;
+        const jobData = await storage.get(jobKey);
+        
+        if (!jobData) {
+          console.warn('[pollVideoStatusBackground] Job data not found for:', jobId);
+          continue;
+        }
+
+        const { pageId } = jobData;
+        if (!pageId) {
+          console.warn('[pollVideoStatusBackground] Page ID missing for job:', jobId);
+          continue;
+        }
+
+        // Check video status
+        const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
+        const response = await fetch(statusUrl, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': API_KEY
+          }
+        });
+
+        if (!response.ok) {
+          console.warn('[pollVideoStatusBackground] Status check failed for job:', jobId, response.status);
+          remainingJobs.push(jobId);
+          continue;
+        }
+
+        const statusData = await response.json();
+        processed++;
+
+        // Check if video is ready
+        if (isVideoReady(statusData)) {
+          console.log('[pollVideoStatusBackground] Video status is ready for job:', jobId);
+          console.log('[pollVideoStatusBackground] Full status response:', JSON.stringify(statusData, null, 2));
+          
+          const videoUrl = extractVideoUrlFromStatus(statusData);
+          if (videoUrl) {
+            console.log('[pollVideoStatusBackground] ✅ Video ready for job:', jobId);
+            console.log('[pollVideoStatusBackground] Video URL:', videoUrl);
+            console.log('[pollVideoStatusBackground] Processing completed video...');
+            // Use asApp() since this is called from scheduled trigger (no user context)
+            await processCompletedVideo(jobId, videoUrl, pageId, true);
+            console.log('[pollVideoStatusBackground] ✅ Successfully processed completed video for job:', jobId);
+            completed++;
+          } else {
+            console.warn('[pollVideoStatusBackground] ⚠️ Video ready but no URL found for job:', jobId);
+            console.warn('[pollVideoStatusBackground] Status data structure:', JSON.stringify(statusData, null, 2));
+            // Keep job in list to retry - maybe URL will appear in next poll
+            remainingJobs.push(jobId);
+          }
+        } else if (isVideoFailed(statusData)) {
+          console.log('[pollVideoStatusBackground] Video generation failed for job:', jobId);
+          // Remove failed job from storage
+          try {
+            await storage.delete(jobKey);
+            const updatedJobs = activeJobs.filter(id => id !== jobId);
+            await storage.set(activeJobsKey, updatedJobs);
+          } catch (cleanupError) {
+            console.warn('[pollVideoStatusBackground] Failed to cleanup failed job:', cleanupError);
+          }
+          failed++;
+        } else {
+          // Still processing, keep in list
+          const currentStatus = statusData?.status || statusData?.data?.status || 'unknown';
+          console.log('[pollVideoStatusBackground] ⏳ Job still processing:', jobId, 'Status:', currentStatus);
+          remainingJobs.push(jobId);
+        }
+      } catch (jobError) {
+        console.error('[pollVideoStatusBackground] Error processing job:', jobId, jobError);
+        remainingJobs.push(jobId);
+      }
+    }
+
+    // Update active jobs list
+    await storage.set(activeJobsKey, remainingJobs);
+    console.log('[pollVideoStatusBackground] Updated active jobs list. Remaining:', remainingJobs.length);
+
+    console.log('[pollVideoStatusBackground] ========== POLLING SUMMARY ==========');
+    console.log('[pollVideoStatusBackground] Processed:', processed);
+    console.log('[pollVideoStatusBackground] Completed:', completed);
+    console.log('[pollVideoStatusBackground] Failed:', failed);
+    console.log('[pollVideoStatusBackground] Remaining:', remainingJobs.length);
+    console.log('[pollVideoStatusBackground] ======================================');
+
+    return {
+      processed,
+      completed,
+      failed,
+      remaining: remainingJobs.length
+    };
+  } catch (error) {
+    console.error('[pollVideoStatusBackground] ❌ Error in background polling:', error);
+    console.error('[pollVideoStatusBackground] Error stack:', error.stack);
+    return { error: error.message };
+  }
+};
