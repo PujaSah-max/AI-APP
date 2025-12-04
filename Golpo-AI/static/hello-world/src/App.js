@@ -903,6 +903,9 @@ function App() {
       if (!statusPayload) {
         return;
       }
+      
+      // Clear video generation result when video is ready
+      setVideoGenerationResult(null);
 
       // Show "Status: Complete" before closing
       setVideoStatusMessage("Status: Complete");
@@ -2106,9 +2109,14 @@ function App() {
       overflowX: "hidden",
       flex: "1 1 auto",
     },
+    helpHeading: {
+      ...styles.helpHeading,
+      fontSize: "18px",
+      marginBottom: "8px",
+    },
     mainHeading: {
       ...styles.mainHeading,
-      fontSize: "22px",
+      fontSize: "16px",
       marginBottom: "16px",
     },
     sectionHeading: {
@@ -2231,64 +2239,43 @@ function App() {
 
         {latestVideoUrl && (
           <section style={currentStyles.latestVideoCard}>
-            <div style={currentStyles.latestVideoHeader}>
-              <div>
-                <p style={currentStyles.latestVideoTitle}>Latest Golpo AI video</p>
-                <p style={currentStyles.latestVideoSubtitle}>Most recent link generated on this page.</p>
-              </div>
-              <span style={currentStyles.latestVideoBadge}>Latest</span>
-            </div>
-            <p style={currentStyles.latestVideoUrl}>
-              <a
-                href={latestVideoUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={currentStyles.latestVideoUrlLink}
-              >
-                {latestVideoUrl}
-              </a>
-            </p>
-            <div style={currentStyles.latestVideoActions}>
-              <button
-                style={currentStyles.latestVideoPrimaryButton}
-                onClick={() => handleCopyVideoUrl(latestVideoUrl)}
-              >
-                Copy URL
-              </button>
-
-              <button
-                style={currentStyles.latestVideoSecondaryButton}
-                onClick={async () => {
-                  if (!requireContentActionForMedia("play the video")) {
-                    return;
-                  }
-                  
-                  setIsLoadingVideo(true);
-                  setError("");
-                  
-                  try {
-                    // Set up video ready info to show in the same preview modal
-                    const normalizedInfo = {
-                      jobId: null,
-                      videoUrl: latestVideoUrl,
-                      downloadUrl: latestVideoUrl,
-                      status: "completed",
-                      raw: { video_url: latestVideoUrl }
-                    };
-                    setVideoReadyInfo(normalizedInfo);
-                    await prepareVideoSource(latestVideoUrl);
-                    setShowVideoReadyModal(true);
-                  } catch (err) {
-                    console.error("[GolpoAI] Failed to prepare video:", err);
-                    setError(err?.message || "Unable to load video. Please try again.");
-                  } finally {
-                    setIsLoadingVideo(false);
-                  }
-                }}
-              >
-                ▶ Play video
-              </button>
-            </div>
+            <p style={currentStyles.latestVideoSubtitle}>Most recent link generated on this page.</p>
+            <a
+              href={latestVideoUrl}
+              style={currentStyles.latestVideoUrlLink}
+              onClick={async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                
+                if (!requireContentActionForMedia("play the video")) {
+                  return;
+                }
+                
+                setIsLoadingVideo(true);
+                setError("");
+                
+                try {
+                  // Set up video ready info to show in the preview modal
+                  const normalizedInfo = {
+                    jobId: null,
+                    videoUrl: latestVideoUrl,
+                    downloadUrl: latestVideoUrl,
+                    status: "completed",
+                    raw: { video_url: latestVideoUrl }
+                  };
+                  setVideoReadyInfo(normalizedInfo);
+                  await prepareVideoSource(latestVideoUrl);
+                  setShowVideoReadyModal(true);
+                } catch (err) {
+                  console.error("[GolpoAI] Failed to prepare video:", err);
+                  setError(err?.message || "Unable to load video. Please try again.");
+                } finally {
+                  setIsLoadingVideo(false);
+                }
+              }}
+            >
+              {latestVideoUrl}
+            </a>
             {copyUrlMessage && (
               <div style={styles.copyUrlToast}>
                 {copyUrlMessage}
@@ -2301,6 +2288,7 @@ function App() {
         <div style={currentStyles.scrollArea}>
           {/* Main Heading */}
           <section style={currentStyles.contentSection}>
+            <p style={currentStyles.helpHeading}>How Can I help?</p>
             <h1 style={currentStyles.mainHeading}>{APP_TAGLINE}</h1>
           </section>
 
@@ -2576,11 +2564,12 @@ function App() {
               )}
 
               {/* Video Generation Result */}
-              {videoGenerationResult && (
+              {videoGenerationResult && videoGenerationResult.status === "processing" && (
                 <div style={{ marginBottom: 16, padding: 12, background: "#efe", borderRadius: 8, color: "#060" }}>
                   <strong>Video Generation Started!</strong>
-                  <pre style={{ marginTop: 8, fontSize: 12, overflow: "auto" }}>
-                    {JSON.stringify(videoGenerationResult, null, 2)}
+                  <pre style={{ marginTop: 8, fontSize: 12, overflow: "auto", whiteSpace: "pre-wrap" }}>
+{`  "job_id": "${videoGenerationResult.job_id || ""}",
+  "status": "${videoGenerationResult.status || ""}",`}
                   </pre>
                 </div>
               )}
@@ -2612,13 +2601,26 @@ function App() {
           <div style={styles.loadingCard}>
             <button
               onClick={() => {
+                // Only allow closing once a job has been created
+                if (!videoJobId) {
+                  return;
+                }
                 setIsGeneratingVideo(false);
                 setIsPollingVideoStatus(false);
                 setVideoStatusMessage("");
                 clearCompletionCheckInterval();
               }}
-              style={styles.loadingCloseButton}
-              title="Close"
+              disabled={!videoJobId}
+              style={{
+                ...styles.loadingCloseButton,
+                opacity: videoJobId ? 1 : 0.4,
+                cursor: videoJobId ? "pointer" : "not-allowed",
+              }}
+              title={
+                videoJobId
+                  ? "Close"
+                  : "Please wait while we start video generation..."
+              }
               onMouseEnter={(e) => {
                 e.target.style.color = "#1e293b";
                 e.target.style.background = "#e2e8f0";
@@ -2650,9 +2652,7 @@ function App() {
                 </>
               ) : (
                 <>
-                  Video generation may take some time.
-                  <br />
-                  You can close this window - the video will be saved in page comments when ready.
+                  <strong>Please wait while we start video generation...</strong>
                 </>
               )}
             </p>
@@ -3085,7 +3085,7 @@ const styles = {
     marginBottom: 20,
     display: "flex",
     flexDirection: "column",
-    gap: 12,
+    gap: 8,
   },
   latestVideoHeader: {
     display: "flex",
@@ -3100,7 +3100,7 @@ const styles = {
     color: "#2B1F35",
   },
   latestVideoSubtitle: {
-    margin: "4px 0 0 0",
+    margin: "0 0 8px 0",
     fontSize: 14,
     color: "#5f4b8b",
   },
@@ -3125,8 +3125,16 @@ const styles = {
     color: "#3b2d71",
   },
   latestVideoUrlLink: {
-    color: "#3b2d71",
-    textDecoration: "none",
+    color: "#0066cc",
+    textDecoration: "underline",
+    fontSize: 13,
+    wordBreak: "break-all",
+    fontFamily: "monospace",
+    cursor: "pointer",
+    pointerEvents: "auto",
+    position: "relative",
+    zIndex: 10,
+    display: "inline-block",
   },
   latestVideoActions: {
     display: "flex",
@@ -3186,7 +3194,8 @@ const styles = {
     paddingBottom: 20,
   },
 
-  mainHeading: { fontSize: 22, marginBottom: 24, marginTop: 0, flexShrink: 0, fontWeight: 600, color: "#1e293b" },
+  helpHeading: { fontSize: 18, marginBottom: 8, marginTop: 0, flexShrink: 0, fontWeight: 700, color: "#1e293b" },
+  mainHeading: { fontSize: 16, marginBottom: 24, marginTop: 0, flexShrink: 0, fontWeight: 400, color: "#1e293b" },
   sectionHeading: { fontSize: 20, marginBottom: 8, marginTop: 0, flexShrink: 0, fontWeight: 600 },
   sectionDescription: { fontSize: 15, color: "#555", marginBottom: 18, flexShrink: 0, marginTop: 0 },
   contentSection: { marginBottom: 20, flexShrink: 0 },

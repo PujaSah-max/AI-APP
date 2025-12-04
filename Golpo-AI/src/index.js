@@ -95,7 +95,8 @@ const parseDurationToMinutes = (input) => {
 };
 
 const requestPageById = async (pageId) => {
-  if (!pageId) {
+  try {
+    if (!pageId || typeof pageId !== 'string') {
     throw new Error('Page id is required to load Confluence page details.');
   }
 
@@ -109,19 +110,35 @@ const requestPageById = async (pageId) => {
   );
 
   if (!response.ok) {
-    const errorBody = await response.text();
+      let errorBody = 'Unable to read error body';
+      try {
+        errorBody = await response.text();
+      } catch (e) {
+        console.warn('[requestPageById] Failed to read error body:', e);
+      }
     console.error('Failed to retrieve Confluence page by id', {
       pageId,
       status: response.status,
       statusText: response.statusText,
-      errorBody
+        errorBody: errorBody.substring(0, 500) // Limit error body length
     });
     throw new Error(`Unable to load Confluence page ${pageId}. Status: ${response.status} ${response.statusText}`);
   }
 
-  const body = await response.json();
+    let body;
+    try {
+      body = await response.json();
+    } catch (jsonError) {
+      console.error('[requestPageById] Failed to parse response JSON:', jsonError);
+      throw new Error(`Invalid response format from Confluence API for page ${pageId}`);
+    }
+    
   console.log('[resolver:requestPageById] payload', JSON.stringify(body));
   return { response, body };
+  } catch (error) {
+    console.error('[requestPageById] Error fetching page:', error);
+    throw error;
+  }
 };
 
 // resolver.define('getText', (req) => {
@@ -132,6 +149,7 @@ const requestPageById = async (pageId) => {
 
 // Get current page information from the resolver context plus REST data
 resolver.define('getCurrentPage', async ({ context }) => {
+  try {
   console.log('[resolver:getCurrentPage] context:', JSON.stringify({
     hasExtension: !!context?.extension,
     extensionType: context?.extension?.type,
@@ -156,28 +174,47 @@ resolver.define('getCurrentPage', async ({ context }) => {
     return body;
   } catch (error) {
     console.error('[resolver:getCurrentPage] Failed to fetch default page data', error);
+      // Return fallback data instead of throwing
     return {
-      id: content.id,
-      title: content.title,
-      type: content.type
+        id: content.id || 'unknown',
+        title: content.title || 'Current Page',
+        type: content.type || 'page'
+      };
+    }
+  } catch (error) {
+    console.error('[resolver:getCurrentPage] Unexpected error:', error);
+    // Always return a valid response, never throw
+    return {
+      id: 'unknown',
+      title: 'Current Page',
+      type: 'page'
     };
   }
 });
 
 resolver.define('getPageById', async ({ payload }) => {
+  try {
   const { pageId } = payload ?? {};
+    if (!pageId) {
+      throw new Error('Page id is required.');
+    }
   const { response, body } = await requestPageById(pageId);
   return {
     status: response.status,
     statusText: response.statusText,
     body
   };
+  } catch (error) {
+    console.error('[resolver:getPageById] Error:', error);
+    throw new Error(`Failed to get page: ${error?.message || 'Unknown error'}`);
+  }
 });
 
 resolver.define('getFooterComments', async ({ payload }) => {
+  try {
   const { pageId } = payload ?? {};
 
-  if (!pageId) {
+    if (!pageId || typeof pageId !== 'string') {
     throw new Error('Page id is required to load footer comments.');
   }
 
@@ -191,17 +228,29 @@ resolver.define('getFooterComments', async ({ payload }) => {
   );
 
   if (!response.ok) {
-    const errorBody = await response.text();
+      let errorBody = 'Unable to read error body';
+      try {
+        errorBody = await response.text();
+      } catch (e) {
+        console.warn('[getFooterComments] Failed to read error body:', e);
+      }
     console.error('Failed to retrieve footer comments', {
       pageId,
       status: response.status,
       statusText: response.statusText,
-      errorBody
+        errorBody: errorBody.substring(0, 500)
     });
     throw new Error(`Unable to load footer comments for page ${pageId}. Status: ${response.status} ${response.statusText}`);
   }
 
-  const commentBody = await response.json();
+    let commentBody;
+    try {
+      commentBody = await response.json();
+    } catch (jsonError) {
+      console.error('[getFooterComments] Failed to parse response JSON:', jsonError);
+      throw new Error(`Invalid response format from Confluence API for footer comments`);
+    }
+    
   console.log('[resolver:getFooterComments] payload', JSON.stringify(commentBody));
 
   return {
@@ -209,12 +258,17 @@ resolver.define('getFooterComments', async ({ payload }) => {
     statusText: response.statusText,
     body: commentBody
   };
+  } catch (error) {
+    console.error('[resolver:getFooterComments] Error:', error);
+    throw new Error(`Failed to get footer comments: ${error?.message || 'Unknown error'}`);
+  }
 });
 
 resolver.define('addFooterComment', async ({ payload }) => {
+  try {
   const { pageId, commentHtml } = payload ?? {};
 
-  if (!pageId) {
+    if (!pageId || typeof pageId !== 'string') {
     throw new Error('Page id is required to add footer comments.');
   }
 
@@ -241,17 +295,29 @@ resolver.define('addFooterComment', async ({ payload }) => {
   );
 
   if (!response.ok) {
-    const errorBody = await response.text();
+      let errorBody = 'Unable to read error body';
+      try {
+        errorBody = await response.text();
+      } catch (e) {
+        console.warn('[addFooterComment] Failed to read error body:', e);
+      }
     console.error('Failed to add footer comment', {
       pageId,
       status: response.status,
       statusText: response.statusText,
-      errorBody
+        errorBody: errorBody.substring(0, 500)
     });
     throw new Error(`Unable to add footer comment for page ${pageId}. Status: ${response.status} ${response.statusText}`);
   }
 
-  const resultBody = await response.json();
+    let resultBody;
+    try {
+      resultBody = await response.json();
+    } catch (jsonError) {
+      console.error('[addFooterComment] Failed to parse response JSON:', jsonError);
+      throw new Error(`Invalid response format from Confluence API`);
+    }
+    
   console.log('[resolver:addFooterComment] payload', JSON.stringify(resultBody));
 
   return {
@@ -259,6 +325,10 @@ resolver.define('addFooterComment', async ({ payload }) => {
     statusText: response.statusText,
     body: resultBody
   };
+  } catch (error) {
+    console.error('[resolver:addFooterComment] Error:', error);
+    throw new Error(`Failed to add footer comment: ${error?.message || 'Unknown error'}`);
+  }
 });
 
 // Convert document to video script using Gemini AI
@@ -267,18 +337,19 @@ resolver.define('addFooterComment', async ({ payload }) => {
 // description: optional brief provided by the user to influence the script
 // issueDocument: optional richer/structured document representation
 const convertDocumentToScript = async (documentText, videoSpecs = {}, description = '', issueDocument = '') => {
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-  
-  if (!GEMINI_API_KEY) {
-    console.warn('[resolver:convertDocumentToScript] Gemini API key not configured, using document as-is');
-    return documentText; // Fallback to original document if Gemini is not configured
-  }
+  try {
+    const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+    
+    if (!GEMINI_API_KEY) {
+      console.warn('[resolver:convertDocumentToScript] Gemini API key not configured, using document as-is');
+      return documentText || ''; // Fallback to original document if Gemini is not configured
+    }
 
-  const { duration = '1 min', language = 'English' } = videoSpecs;
-  const issueDocumentText = issueDocument || documentText;
+    const { duration = '1 min', language = 'English' } = videoSpecs;
+    const issueDocumentText = issueDocument || documentText;
   
-  // Build prompt for Gemini to convert document to video script
-  const prompt = `You are a professional video script writer. Convert the following document into a clear, concise video script that summarizes the document without turning it into a long story or narrative.
+    // Build prompt for Gemini to convert document to video script
+    const prompt = `You are a professional video script writer. Convert the following document into a clear, concise video script that summarizes the document without turning it into a long story or narrative.
 
 The script should:
 
@@ -296,7 +367,6 @@ ${issueDocumentText}
 
 Generate only the script text, with no markdown formatting or additional commentary.`;
 
-  try {
     // Use Gemini API v1beta generateContent endpoint
     const model = 'gemini-2.5-flash'; // or 'gemini-1.5-pro' for newer models
     const apiUrl = `${GEMINI_API_BASE_URL}/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
@@ -330,7 +400,7 @@ Generate only the script text, with no markdown formatting or additional comment
       });
       // Fallback to original document on error
       console.warn('[resolver:convertDocumentToScript] Falling back to original document');
-      return documentText;
+      return documentText || '';
     }
 
     const data = await response.json();
@@ -350,17 +420,23 @@ Generate only the script text, with no markdown formatting or additional comment
       console.log('[resolver:convertDocumentToScript] Using original document (no script generated)');
     }
     
-    return script;
+    return script || documentText || '';
   } catch (error) {
-    console.error('[resolver:convertDocumentToScript] Error calling Gemini API:', error);
-    // Fallback to original document on error
+    console.error('[resolver:convertDocumentToScript] Unexpected error:', error);
+    console.error('[resolver:convertDocumentToScript] Error details:', {
+      message: error?.message,
+      stack: error?.stack,
+      name: error?.name
+    });
+    // Fallback to original document on error - never throw, always return something
     console.warn('[resolver:convertDocumentToScript] Falling back to original document');
-    return documentText;
+    return documentText || ''; // Ensure we always return a string
   }
 };
 
 // Generate video using Golpo AI API
 resolver.define('generateVideo', async ({ payload }) => {
+  try {
   const { document, videoSpecs, description } = payload ?? {};
 
   if (!document) {
@@ -453,7 +529,7 @@ resolver.define('generateVideo', async ({ payload }) => {
   // Get content for duration calculation
   const contentForDuration = document?.fullText || document?.content || prompt || description || '';
   const calculatedDuration = calculateDurationFromContent(contentForDuration);
-  
+
   // Map duration to timing value
   // API requires minimum 2 minutes, so enforce that
   const MINIMUM_DURATION_MINUTES = 2;
@@ -615,8 +691,8 @@ resolver.define('generateVideo', async ({ payload }) => {
 
   console.log('[resolver:generateVideo] requestBody:', JSON.stringify(requestBody, null, 2));
 
-  try {
-    const response = await fetch(`${GOLPO_API_BASE_URL}/api/v1/videos/generate`, {
+  let response;
+  response = await fetch(`${GOLPO_API_BASE_URL}/api/v1/videos/generate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -626,34 +702,47 @@ resolver.define('generateVideo', async ({ payload }) => {
     });
 
     if (!response.ok) {
-      const errorBody = await response.text();
-      let errorMessage = `Golpo AI API error: ${response.status} ${response.statusText}`;
-      
-      // Try to parse error body for more details
-      try {
-        const errorJson = JSON.parse(errorBody);
-        if (errorJson.detail) {
-          errorMessage += `. ${errorJson.detail}`;
-        } else if (errorJson.message) {
-          errorMessage += `. ${errorJson.message}`;
-        } else {
-          errorMessage += `. ${errorBody}`;
-        }
-      } catch (e) {
-        errorMessage += `. ${errorBody}`;
+    let errorBody = 'Unable to read error body';
+    try {
+      errorBody = await response.text();
+    } catch (e) {
+      console.warn('[resolver:generateVideo] Failed to read error body:', e);
+    }
+    
+    let errorMessage = `Golpo AI API error: ${response.status} ${response.statusText}`;
+    
+    // Try to parse error body for more details
+    try {
+      const errorJson = JSON.parse(errorBody);
+      if (errorJson.detail) {
+        errorMessage += `. ${errorJson.detail}`;
+      } else if (errorJson.message) {
+        errorMessage += `. ${errorJson.message}`;
+      } else {
+        errorMessage += `. ${errorBody.substring(0, 500)}`;
       }
-      
+    } catch (parseError) {
+      errorMessage += `. ${errorBody.substring(0, 500)}`;
+    }
+    
       console.error('[resolver:generateVideo] Golpo AI API error', {
         status: response.status,
         statusText: response.statusText,
-        errorBody,
-        errorMessage
-      });
-      
-      throw new Error(errorMessage);
-    }
+      errorBody: errorBody.substring(0, 500),
+      errorMessage
+    });
+    
+    throw new Error(errorMessage);
+  }
 
-    const data = await response.json();
+  let data;
+  try {
+    data = await response.json();
+  } catch (jsonError) {
+    console.error('[resolver:generateVideo] Failed to parse response JSON:', jsonError);
+    throw new Error('Invalid response format from Golpo AI API');
+  }
+    
     console.log('[resolver:generateVideo] Step 2: Golpo AI API response received');
     console.log('[resolver:generateVideo] Golpo AI API response:', JSON.stringify(data, null, 2));
 
@@ -664,6 +753,25 @@ resolver.define('generateVideo', async ({ payload }) => {
     // If we have a jobId and pageId, store job info in Forge storage for background polling
     if (jobId && pageId) {
       try {
+        // Try to capture the user who requested this video
+        let requestedBy = null;
+        try {
+          const meResponse = await api.asUser().requestConfluence(
+            route`/wiki/api/v2/users/me`
+          );
+          if (meResponse.ok) {
+            const me = await meResponse.json();
+            requestedBy = {
+              accountId: me.accountId || me.id || null,
+              displayName: me.displayName || me.publicName || null,
+            };
+          } else {
+            console.warn('[resolver:generateVideo] Failed to fetch current user info for job metadata:', meResponse.status);
+          }
+        } catch (userError) {
+          console.warn('[resolver:generateVideo] Error fetching current user info for job metadata:', userError);
+        }
+
         const jobKey = `video-job-${jobId}`;
         const jobData = {
           jobId,
@@ -673,7 +781,8 @@ resolver.define('generateVideo', async ({ payload }) => {
           document: {
             pageId: document.pageId,
             title: document.title
-          }
+          },
+          requestedBy,
         };
         
         await storage.set(jobKey, jobData);
@@ -713,34 +822,41 @@ resolver.define('generateVideo', async ({ payload }) => {
     };
 
     return {
-      status: response.status,
-      statusText: response.statusText,
+      status: response?.status || 200,
+      statusText: response?.statusText || 'OK',
       body: responseBody
     };
   } catch (error) {
     console.error('[resolver:generateVideo] Error calling Golpo AI API:', error);
-    throw new Error(`Failed to generate video: ${error.message}`);
+    const errorMessage = error?.message || 'Unknown error occurred';
+    console.error('[resolver:generateVideo] Full error details:', {
+      message: errorMessage,
+      stack: error?.stack,
+      name: error?.name
+    });
+    throw new Error(`Failed to generate video: ${errorMessage}`);
   }
 });
 
 // Poll Golpo AI for video generation status by job id
 resolver.define('getVideoStatus', async ({ payload }) => {
-  const { jobId } = payload ?? {};
-
-  if (!jobId) {
-    throw new Error('Job id is required to check video status.');
-  }
-
-  const API_KEY = process.env.GOLPO_API_KEY || 'api-key';
-
-  if (!API_KEY || API_KEY === 'api-key') {
-    throw new Error('Golpo API key is not configured. Please set GOLPO_API_KEY environment variable.');
-  }
-
-  const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
-  console.log('[resolver:getVideoStatus] Checking status for job', jobId, 'using', statusUrl);
-
   try {
+    const { jobId } = payload ?? {};
+
+    if (!jobId || typeof jobId !== 'string') {
+      throw new Error('Job id is required to check video status.');
+    }
+
+    const API_KEY = process.env.GOLPO_API_KEY || 'api-key';
+
+    if (!API_KEY || API_KEY === 'api-key') {
+      throw new Error('Golpo API key is not configured. Please set GOLPO_API_KEY environment variable.');
+    }
+
+    const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
+    console.log('[resolver:getVideoStatus] Checking status for job', jobId, 'using', statusUrl);
+
+    try {
     const response = await fetch(statusUrl, {
       method: 'GET',
       headers: {
@@ -762,28 +878,38 @@ resolver.define('getVideoStatus', async ({ payload }) => {
     const data = await response.json();
     console.log('[resolver:getVideoStatus] Status response:', JSON.stringify(data, null, 2));
 
-    return {
-      status: response.status,
-      statusText: response.statusText,
-      body: data
-    };
+      return {
+        status: response.status,
+        statusText: response.statusText,
+        body: data
+      };
+    } catch (innerError) {
+      console.error('[resolver:getVideoStatus] Error calling Golpo AI status API:', innerError);
+      throw innerError;
+    }
   } catch (error) {
-    console.error('[resolver:getVideoStatus] Error calling Golpo AI status API:', error);
-    throw new Error(`Failed to fetch video status: ${error.message}`);
+    console.error('[resolver:getVideoStatus] Error:', error);
+    const errorMessage = error?.message || 'Unknown error occurred';
+    console.error('[resolver:getVideoStatus] Full error details:', {
+      message: errorMessage,
+      stack: error?.stack,
+      name: error?.name,
+      jobId: payload?.jobId
+    });
+    throw new Error(`Failed to fetch video status: ${errorMessage}`);
   }
 });
 
 // Fetch video file via backend to bypass CSP restrictions
 resolver.define('fetchVideoFile', async ({ payload }) => {
-  const { videoUrl } = payload ?? {};
+  try {
+    const { videoUrl } = payload ?? {};
 
-  if (!videoUrl) {
-    throw new Error('Video url is required to fetch media.');
-  }
+    if (!videoUrl || typeof videoUrl !== 'string') {
+      throw new Error('Video url is required to fetch media.');
+    }
 
   console.log('[resolver:fetchVideoFile] Fetching video from:', videoUrl);
-
-  try {
     const response = await fetch(videoUrl, {
       method: 'GET',
       headers: {
@@ -977,26 +1103,27 @@ resolver.define('fetchVideoFile', async ({ payload }) => {
 
 // Add video URL as a footer comment to the Confluence page
 resolver.define('addVideoCommentToPage', async ({ payload }) => {
-  const { pageId, videoUrl, commentBodyHtml } = payload ?? {};
-
-  if (!pageId) {
-    throw new Error('Page id is required to add footer comment.');
-  }
-
-  if (!videoUrl) {
-    throw new Error('Video URL is required to add footer comment.');
-  }
-
-  if (!commentBodyHtml) {
-    throw new Error('Comment body HTML is required to add footer comment.');
-  }
-
-  // Use the comment body HTML provided by frontend
-  const commentBody = commentBodyHtml;
-
-  console.log('[resolver:addVideoCommentToPage] Adding footer comment to page', pageId, 'with video URL:', videoUrl);
-
   try {
+    const { pageId, videoUrl, commentBodyHtml } = payload ?? {};
+
+    if (!pageId || typeof pageId !== 'string') {
+      throw new Error('Page id is required to add footer comment.');
+    }
+
+    if (!videoUrl || typeof videoUrl !== 'string') {
+      throw new Error('Video URL is required to add footer comment.');
+    }
+
+    if (!commentBodyHtml || typeof commentBodyHtml !== 'string') {
+      throw new Error('Comment body HTML is required to add footer comment.');
+    }
+
+    // Use the comment body HTML provided by frontend
+    const commentBody = commentBodyHtml;
+
+    console.log('[resolver:addVideoCommentToPage] Adding footer comment to page', pageId, 'with video URL:', videoUrl);
+
+    try {
     const response = await api.asUser().requestConfluence(
       route`/wiki/api/v2/footer-comments`,
       {
@@ -1015,28 +1142,44 @@ resolver.define('addVideoCommentToPage', async ({ payload }) => {
       }
     );
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      console.error('[resolver:addVideoCommentToPage] Failed to create footer comment', {
-        pageId,
+      if (!response.ok) {
+        let errorBody = 'Unable to read error body';
+        try {
+          errorBody = await response.text();
+        } catch (e) {
+          console.warn('[addVideoCommentToPage] Failed to read error body:', e);
+        }
+        console.error('[resolver:addVideoCommentToPage] Failed to create footer comment', {
+          pageId,
+          status: response.status,
+          statusText: response.statusText,
+          errorBody: errorBody.substring(0, 500)
+        });
+        throw new Error(`Unable to add footer comment to page ${pageId}. Status: ${response.status} ${response.statusText}`);
+      }
+
+      let commentData;
+      try {
+        commentData = await response.json();
+      } catch (jsonError) {
+        console.error('[addVideoCommentToPage] Failed to parse response JSON:', jsonError);
+        throw new Error(`Invalid response format from Confluence API`);
+      }
+      
+      console.log('[resolver:addVideoCommentToPage] Footer comment created successfully:', JSON.stringify(commentData, null, 2));
+
+      return {
         status: response.status,
         statusText: response.statusText,
-        errorBody
-      });
-      throw new Error(`Unable to add footer comment to page ${pageId}. Status: ${response.status} ${response.statusText}`);
+        body: commentData
+      };
+    } catch (innerError) {
+      console.error('[resolver:addVideoCommentToPage] Error creating footer comment:', innerError);
+      throw innerError;
     }
-
-    const commentData = await response.json();
-    console.log('[resolver:addVideoCommentToPage] Footer comment created successfully:', JSON.stringify(commentData, null, 2));
-
-    return {
-      status: response.status,
-      statusText: response.statusText,
-      body: commentData
-    };
   } catch (error) {
-    console.error('[resolver:addVideoCommentToPage] Error creating footer comment:', error);
-    throw new Error(`Failed to add video comment to page: ${error.message}`);
+    console.error('[resolver:addVideoCommentToPage] Error:', error);
+    throw new Error(`Failed to add video comment to page: ${error?.message || 'Unknown error'}`);
   }
 });
 
@@ -1113,8 +1256,22 @@ const isVideoFailed = (statusData) => {
 };
 
 // Helper function to build comment HTML for video URL
-const buildCommentBodyHtml = (videoUrl) => {
-  return `<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>`;
+// Optionally includes the user who requested the video (from job metadata)
+const buildCommentBodyHtml = (videoUrl, requestedBy) => {
+  const safeRequestedBy =
+    (requestedBy &&
+      (requestedBy.displayName ||
+        requestedBy.publicName ||
+        requestedBy.name ||
+        requestedBy.username ||
+        (typeof requestedBy === 'string' ? requestedBy : null))) ||
+    null;
+
+  const requestedByHtml = safeRequestedBy
+    ? `<p><em>Requested by: ${safeRequestedBy}</em></p>`
+    : '';
+
+  return `<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>${requestedByHtml}`;
 };
 
 // Helper function to build video section HTML for page content
@@ -1124,11 +1281,18 @@ const buildVideoSectionHtml = (videoUrl) => {
 
 // Process completed video: add to comments only (not page content)
 // Use asApp() for scheduled triggers (no user context), asUser() for resolver calls
-const processCompletedVideo = async (jobId, videoUrl, pageId, useAsApp = false) => {
+// requestedBy: optional user info ({ displayName, accountId, ... }) captured when the job was created
+const processCompletedVideo = async (jobId, videoUrl, pageId, useAsApp = false, requestedBy = null) => {
   try {
-    console.log('[processCompletedVideo] Processing completed video:', { jobId, videoUrl, pageId, useAsApp });
+    console.log('[processCompletedVideo] Processing completed video:', {
+      jobId,
+      videoUrl,
+      pageId,
+      useAsApp,
+      requestedBy,
+    });
     
-    const commentBodyHtml = buildCommentBodyHtml(videoUrl);
+    const commentBodyHtml = buildCommentBodyHtml(videoUrl, requestedBy);
 
     // Use asApp() for scheduled triggers, asUser() for resolver calls
     const apiCall = useAsApp ? api.asApp() : api.asUser();
@@ -1182,21 +1346,28 @@ const processCompletedVideo = async (jobId, videoUrl, pageId, useAsApp = false) 
     return { success: true };
   } catch (error) {
     console.error('[processCompletedVideo] Error processing completed video:', error);
-    throw error;
+    console.error('[processCompletedVideo] Full error details:', {
+      message: error?.message,
+      stack: error?.stack,
+      name: error?.name,
+      jobId,
+      pageId
+    });
+    // Don't throw - log and return failure status
+    return { success: false, error: error?.message || 'Unknown error' };
   }
 };
 
 // Web trigger function to poll video status in background
 resolver.define('pollVideoStatusBackground', async () => {
-  console.log('[pollVideoStatusBackground] Starting background polling');
-  
-  const API_KEY = process.env.GOLPO_API_KEY || 'api-key';
-  if (!API_KEY || API_KEY === 'api-key') {
-    console.error('[pollVideoStatusBackground] Golpo API key not configured');
-    return { error: 'API key not configured' };
-  }
-
   try {
+    console.log('[pollVideoStatusBackground] Starting background polling');
+    
+    const API_KEY = process.env.GOLPO_API_KEY || 'api-key';
+    if (!API_KEY || API_KEY === 'api-key') {
+      console.error('[pollVideoStatusBackground] Golpo API key not configured');
+      return { error: 'API key not configured', processed: 0 };
+    }
     // Get list of active jobs
     const activeJobsKey = 'active-video-jobs';
     const activeJobs = await storage.get(activeJobsKey) || [];
@@ -1224,7 +1395,7 @@ resolver.define('pollVideoStatusBackground', async () => {
           continue;
         }
 
-        const { pageId } = jobData;
+        const { pageId, requestedBy } = jobData;
         if (!pageId) {
           console.warn('[pollVideoStatusBackground] Page ID missing for job:', jobId);
           continue;
@@ -1246,7 +1417,14 @@ resolver.define('pollVideoStatusBackground', async () => {
           continue;
         }
 
-        const statusData = await response.json();
+        let statusData;
+        try {
+          statusData = await response.json();
+        } catch (jsonError) {
+          console.error('[pollVideoStatusBackground] Failed to parse status response JSON:', jsonError);
+          remainingJobs.push(jobId);
+          continue;
+        }
         processed++;
 
         // Check if video is ready
@@ -1260,7 +1438,8 @@ resolver.define('pollVideoStatusBackground', async () => {
             console.log('[pollVideoStatusBackground] Video URL:', videoUrl);
             console.log('[pollVideoStatusBackground] Processing completed video...');
             // Use asApp() since this is called from scheduled trigger (no user context)
-            await processCompletedVideo(jobId, videoUrl, pageId, true);
+            // Pass requestedBy from job metadata so we can attribute the comment
+            await processCompletedVideo(jobId, videoUrl, pageId, true, requestedBy);
             console.log('[pollVideoStatusBackground] ✅ Successfully processed completed video for job:', jobId);
             completed++;
           } else {
@@ -1293,7 +1472,12 @@ resolver.define('pollVideoStatusBackground', async () => {
     }
 
     // Update active jobs list
-    await storage.set(activeJobsKey, remainingJobs);
+    try {
+      await storage.set(activeJobsKey, remainingJobs);
+    } catch (storageError) {
+      console.error('[pollVideoStatusBackground] Failed to update active jobs list:', storageError);
+      // Don't throw - continue even if storage update fails
+    }
 
     console.log('[pollVideoStatusBackground] Polling complete:', {
       processed,
@@ -1314,137 +1498,25 @@ resolver.define('pollVideoStatusBackground', async () => {
   }
 });
 
-// Export handler for resolver
-export const handler = resolver.getDefinitions();
+// Export handler for resolver and scheduled trigger function
+const resolverDefinitions = resolver.getDefinitions();
 
-// Export function for scheduled trigger
-export const pollVideoStatusBackground = async ({ context }) => {
+// Export handler for resolver (required by manifest.yml)
+module.exports.handler = resolverDefinitions;
+
+// Export function for scheduled trigger (required by manifest.yml)
+module.exports.pollVideoStatusBackground = async ({ context }) => {
   console.log('[pollVideoStatusBackground] ========== SCHEDULED TRIGGER INVOKED ==========');
   console.log('[pollVideoStatusBackground] Context:', JSON.stringify(context, null, 2));
   console.log('[pollVideoStatusBackground] Timestamp:', new Date().toISOString());
   
-  const API_KEY = process.env.GOLPO_API_KEY || 'api-key';
-  if (!API_KEY || API_KEY === 'api-key') {
-    console.error('[pollVideoStatusBackground] ❌ Golpo API key not configured');
-    return { error: 'API key not configured' };
+  // Get the resolver function
+  const resolverFunc = resolverDefinitions['pollVideoStatusBackground'];
+  if (resolverFunc) {
+    return await resolverFunc({ context });
   }
-
-  try {
-    // Get list of active jobs
-    const activeJobsKey = 'active-video-jobs';
-    const activeJobs = await storage.get(activeJobsKey) || [];
-    
-    if (activeJobs.length === 0) {
-      console.log('[pollVideoStatusBackground] ℹ️ No active jobs to poll');
-      return { message: 'No active jobs', processed: 0 };
-    }
-
-    console.log('[pollVideoStatusBackground] ✅ Found', activeJobs.length, 'active job(s):', activeJobs);
-
-    let processed = 0;
-    let completed = 0;
-    let failed = 0;
-    const remainingJobs = [];
-
-    // Poll each active job
-    for (const jobId of activeJobs) {
-      try {
-        const jobKey = `video-job-${jobId}`;
-        const jobData = await storage.get(jobKey);
-        
-        if (!jobData) {
-          console.warn('[pollVideoStatusBackground] Job data not found for:', jobId);
-          continue;
-        }
-
-        const { pageId } = jobData;
-        if (!pageId) {
-          console.warn('[pollVideoStatusBackground] Page ID missing for job:', jobId);
-          continue;
-        }
-
-        // Check video status
-        const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
-        const response = await fetch(statusUrl, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': API_KEY
-          }
-        });
-
-        if (!response.ok) {
-          console.warn('[pollVideoStatusBackground] Status check failed for job:', jobId, response.status);
-          remainingJobs.push(jobId);
-          continue;
-        }
-
-        const statusData = await response.json();
-        processed++;
-
-        // Check if video is ready
-        if (isVideoReady(statusData)) {
-          console.log('[pollVideoStatusBackground] Video status is ready for job:', jobId);
-          console.log('[pollVideoStatusBackground] Full status response:', JSON.stringify(statusData, null, 2));
-          
-          const videoUrl = extractVideoUrlFromStatus(statusData);
-          if (videoUrl) {
-            console.log('[pollVideoStatusBackground] ✅ Video ready for job:', jobId);
-            console.log('[pollVideoStatusBackground] Video URL:', videoUrl);
-            console.log('[pollVideoStatusBackground] Processing completed video...');
-            // Use asApp() since this is called from scheduled trigger (no user context)
-            await processCompletedVideo(jobId, videoUrl, pageId, true);
-            console.log('[pollVideoStatusBackground] ✅ Successfully processed completed video for job:', jobId);
-            completed++;
-          } else {
-            console.warn('[pollVideoStatusBackground] ⚠️ Video ready but no URL found for job:', jobId);
-            console.warn('[pollVideoStatusBackground] Status data structure:', JSON.stringify(statusData, null, 2));
-            // Keep job in list to retry - maybe URL will appear in next poll
-            remainingJobs.push(jobId);
-          }
-        } else if (isVideoFailed(statusData)) {
-          console.log('[pollVideoStatusBackground] Video generation failed for job:', jobId);
-          // Remove failed job from storage
-          try {
-            await storage.delete(jobKey);
-            const updatedJobs = activeJobs.filter(id => id !== jobId);
-            await storage.set(activeJobsKey, updatedJobs);
-          } catch (cleanupError) {
-            console.warn('[pollVideoStatusBackground] Failed to cleanup failed job:', cleanupError);
-          }
-          failed++;
-        } else {
-          // Still processing, keep in list
-          const currentStatus = statusData?.status || statusData?.data?.status || 'unknown';
-          console.log('[pollVideoStatusBackground] ⏳ Job still processing:', jobId, 'Status:', currentStatus);
-          remainingJobs.push(jobId);
-        }
-      } catch (jobError) {
-        console.error('[pollVideoStatusBackground] Error processing job:', jobId, jobError);
-        remainingJobs.push(jobId);
-      }
-    }
-
-    // Update active jobs list
-    await storage.set(activeJobsKey, remainingJobs);
-    console.log('[pollVideoStatusBackground] Updated active jobs list. Remaining:', remainingJobs.length);
-
-    console.log('[pollVideoStatusBackground] ========== POLLING SUMMARY ==========');
-    console.log('[pollVideoStatusBackground] Processed:', processed);
-    console.log('[pollVideoStatusBackground] Completed:', completed);
-    console.log('[pollVideoStatusBackground] Failed:', failed);
-    console.log('[pollVideoStatusBackground] Remaining:', remainingJobs.length);
-    console.log('[pollVideoStatusBackground] ======================================');
-
-    return {
-      processed,
-      completed,
-      failed,
-      remaining: remainingJobs.length
-    };
-  } catch (error) {
-    console.error('[pollVideoStatusBackground] ❌ Error in background polling:', error);
-    console.error('[pollVideoStatusBackground] Error stack:', error.stack);
-    return { error: error.message };
-  }
+  
+  // Fallback implementation if resolver not found
+  console.error('[pollVideoStatusBackground] Resolver function not found, using fallback');
+  return { error: 'Resolver function not found' };
 };
