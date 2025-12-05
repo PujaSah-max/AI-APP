@@ -847,23 +847,72 @@ resolver.define('generateVideo', async ({ payload }) => {
     // If we have a jobId and pageId, store job info in Forge storage for background polling
     if (jobId && pageId) {
       try {
-        // Try to capture the user who requested this video
+        // Fetch complete user data using Confluence API endpoint and store in Forge storage
         let requestedBy = null;
         try {
+          console.log('[resolver:generateVideo] Fetching user data from Confluence API...');
           const meResponse = await api.asUser().requestConfluence(
             route`/wiki/api/v2/users/me`
           );
+          
           if (meResponse.ok) {
             const me = await meResponse.json();
+            console.log('[resolver:generateVideo] User data received:', JSON.stringify(me, null, 2));
+            
+            // Extract all relevant user information
             requestedBy = {
               accountId: me.accountId || me.id || null,
-              displayName: me.displayName || me.publicName || null,
+              id: me.id || me.accountId || null,
+              displayName: me.displayName || me.publicName || me.name || null,
+              publicName: me.publicName || me.displayName || null,
+              name: me.name || me.displayName || me.publicName || null,
+              username: me.username || null,
+              email: me.email || null,
+              profilePicture: me.profilePicture || null,
+              type: me.type || 'user',
+              // Store timestamp when user data was captured
+              capturedAt: new Date().toISOString(),
             };
+            
+            // Store user info separately in Forge storage for future reference
+            if (requestedBy.accountId) {
+              const userStorageKey = `user-info-${requestedBy.accountId}`;
+              try {
+                await storage.set(userStorageKey, {
+                  accountId: requestedBy.accountId,
+                  displayName: requestedBy.displayName,
+                  publicName: requestedBy.publicName,
+                  name: requestedBy.name,
+                  username: requestedBy.username,
+                  email: requestedBy.email,
+                  profilePicture: requestedBy.profilePicture,
+                  type: requestedBy.type,
+                  lastUpdated: new Date().toISOString(),
+                });
+                console.log('[resolver:generateVideo] ✅ Stored user info in Forge storage:', userStorageKey);
+              } catch (userStorageError) {
+                console.warn('[resolver:generateVideo] Failed to store user info separately:', userStorageError);
+                // Continue even if separate storage fails
+              }
+            }
+            
+            console.log('[resolver:generateVideo] ✅ User data captured and ready to store with job:', {
+              accountId: requestedBy.accountId,
+              displayName: requestedBy.displayName,
+            });
           } else {
-            console.warn('[resolver:generateVideo] Failed to fetch current user info for job metadata:', meResponse.status);
+            const errorText = await meResponse.text();
+            console.warn('[resolver:generateVideo] Failed to fetch current user info for job metadata:', {
+              status: meResponse.status,
+              statusText: meResponse.statusText,
+              error: errorText,
+            });
           }
         } catch (userError) {
-          console.warn('[resolver:generateVideo] Error fetching current user info for job metadata:', userError);
+          console.warn('[resolver:generateVideo] Error fetching current user info for job metadata:', {
+            message: userError?.message,
+            stack: userError?.stack,
+          });
         }
 
         const jobKey = `video-job-${jobId}`;
@@ -1351,23 +1400,106 @@ const isVideoFailed = (statusData) => {
          statusLower === 'rejected';
 };
 
+// Helper function to fetch user info by accountId from Confluence API
+const fetchUserByAccountId = async (accountId, useAsApp = false) => {
+  if (!accountId) {
+    return null;
+  }
+  
+  try {
+    console.log('[fetchUserByAccountId] Fetching user info for accountId:', accountId);
+    const apiCall = useAsApp ? api.asApp() : api.asUser();
+    
+    // Try to fetch user by accountId using Confluence API
+    // Note: Confluence API v2 uses accountId in the path
+    const userResponse = await apiCall.requestConfluence(
+      route`/wiki/api/v2/users/${accountId}`
+    );
+    
+    if (userResponse.ok) {
+      const userData = await userResponse.json();
+      console.log('[fetchUserByAccountId] ✅ Successfully fetched user:', {
+        accountId: userData.accountId,
+        displayName: userData.displayName,
+        publicName: userData.publicName,
+      });
+      return {
+        accountId: userData.accountId || accountId,
+        displayName: userData.displayName || userData.publicName || userData.name || null,
+        publicName: userData.publicName || userData.displayName || null,
+        name: userData.name || userData.displayName || userData.publicName || null,
+        username: userData.username || null,
+      };
+    } else {
+      const errorText = await userResponse.text();
+      console.warn('[fetchUserByAccountId] Failed to fetch user:', {
+        accountId,
+        status: userResponse.status,
+        error: errorText,
+      });
+      return null;
+    }
+  } catch (error) {
+    console.warn('[fetchUserByAccountId] Error fetching user by accountId:', {
+      accountId,
+      error: error?.message,
+    });
+    return null;
+  }
+};
+
 // Helper function to build comment HTML for video URL
 // Optionally includes the user who requested the video (from job metadata)
-const buildCommentBodyHtml = (videoUrl, requestedBy) => {
-  const safeRequestedBy =
-    (requestedBy &&
-      (requestedBy.displayName ||
-        requestedBy.publicName ||
-        requestedBy.name ||
-        requestedBy.username ||
-        (typeof requestedBy === 'string' ? requestedBy : null))) ||
-    null;
+// Always fetches username from accountId when available to ensure we have the actual user name
+const buildCommentBodyHtml = async (videoUrl, requestedBy, useAsApp = false) => {
+  console.log('[buildCommentBodyHtml] Input:', { videoUrl, requestedBy: JSON.stringify(requestedBy, null, 2), useAsApp });
+  
+  let generatedBy = null;
+  
+  // Always try to fetch from accountId first if available (most reliable source)
+  if (requestedBy?.accountId) {
+    console.log('[buildCommentBodyHtml] Fetching user info from accountId:', requestedBy.accountId);
+    const fetchedUser = await fetchUserByAccountId(requestedBy.accountId, useAsApp);
+    if (fetchedUser) {
+      generatedBy = fetchedUser.displayName || fetchedUser.publicName || fetchedUser.name || null;
+      console.log('[buildCommentBodyHtml] ✅ Fetched displayName from API:', generatedBy);
+    }
+  }
+  
+  // Fallback to existing displayName/publicName/name if fetch failed or no accountId
+  if (!generatedBy) {
+    generatedBy = requestedBy?.displayName || requestedBy?.publicName || requestedBy?.name || null;
+    console.log('[buildCommentBodyHtml] Using displayName from requestedBy:', generatedBy);
+  }
+  
+  // Final fallback to 'User' if still no name found
+  if (!generatedBy) {
+    console.warn('[buildCommentBodyHtml] No username found, using default "User"');
+    generatedBy = 'User';
+  }
+  
+  console.log('[buildCommentBodyHtml] Final generatedBy (displayName):', generatedBy);
 
-  const requestedByHtml = safeRequestedBy
-    ? `<p><em>Requested by: ${safeRequestedBy}</em></p>`
-    : '';
+  // Build user mention - always show username as plain text (same as Jira implementation)
+  // Position: BELOW the link (can be changed to ABOVE by swapping return statement)
+  let requestedByHtml = '';
+  if (generatedBy && generatedBy !== 'User') {
+    // Escape username for HTML safety
+    const escapedUsername = String(generatedBy).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    requestedByHtml = `<p style="margin-top: 12px; margin-bottom: 0;"><strong>Created by:</strong> ${escapedUsername}</p>`;
+    console.log('[buildCommentBodyHtml] Generated plain text username:', requestedByHtml);
+  } else {
+    console.warn('[buildCommentBodyHtml] No displayName found, using default "User"');
+    // Still show "Created by: User" if no displayName found
+    requestedByHtml = `<p style="margin-top: 12px; margin-bottom: 0;"><strong>Created by:</strong> User</p>`;
+  }
 
-  return `<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>${requestedByHtml}`;
+  const finalHtml = `<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>${requestedByHtml}`;
+  console.log('[buildCommentBodyHtml] Final HTML:', finalHtml);
+  
+  // Show "Created by" BELOW the link (default)
+  // To show ABOVE the link, change to: return `${requestedByHtml}<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>`;
+  return finalHtml;
 };
 
 // Helper function to build video section HTML for page content
@@ -1385,10 +1517,20 @@ const processCompletedVideo = async (jobId, videoUrl, pageId, useAsApp = false, 
       videoUrl,
       pageId,
       useAsApp,
-      requestedBy,
+      requestedBy: requestedBy ? {
+        accountId: requestedBy.accountId,
+        displayName: requestedBy.displayName,
+        hasAccountId: !!requestedBy.accountId,
+        hasDisplayName: !!requestedBy.displayName,
+        fullData: requestedBy,
+      } : null,
     });
     
-    const commentBodyHtml = buildCommentBodyHtml(videoUrl, requestedBy);
+    // Log the comment HTML that will be generated
+    // buildCommentBodyHtml is now async and can fetch username from accountId
+    const commentBodyHtml = await buildCommentBodyHtml(videoUrl, requestedBy, useAsApp);
+    console.log('[processCompletedVideo] Generated comment HTML:', commentBodyHtml);
+    console.log('[processCompletedVideo] requestedBy value:', JSON.stringify(requestedBy, null, 2));
 
     // Use asApp() for scheduled triggers, asUser() for resolver calls
     const apiCall = useAsApp ? api.asApp() : api.asUser();
@@ -1496,6 +1638,57 @@ resolver.define('pollVideoStatusBackground', async () => {
           console.warn('[pollVideoStatusBackground] Page ID missing for job:', jobId);
           continue;
         }
+        
+        // Log requestedBy to debug user name issue
+        console.log('[pollVideoStatusBackground] Retrieved job data for:', jobId, {
+          pageId,
+          requestedBy: requestedBy ? {
+            accountId: requestedBy.accountId,
+            displayName: requestedBy.displayName,
+            hasAccountId: !!requestedBy.accountId,
+            hasDisplayName: !!requestedBy.displayName,
+          } : null,
+        });
+        
+        // If requestedBy is missing, try to retrieve from separate user storage
+        let finalRequestedBy = requestedBy;
+        
+        // First, check if requestedBy exists but might be stored differently
+        if (!finalRequestedBy && jobData.requestedBy) {
+          finalRequestedBy = jobData.requestedBy;
+          console.log('[pollVideoStatusBackground] Using requestedBy directly from jobData:', finalRequestedBy);
+        }
+        
+        // If still missing or incomplete, try to retrieve from separate user storage
+        if (!finalRequestedBy || (!finalRequestedBy.displayName && !finalRequestedBy.publicName && !finalRequestedBy.name && !finalRequestedBy.username)) {
+          console.warn('[pollVideoStatusBackground] requestedBy missing or incomplete in job data, trying to retrieve from storage...');
+          console.log('[pollVideoStatusBackground] Current requestedBy:', JSON.stringify(finalRequestedBy, null, 2));
+          console.log('[pollVideoStatusBackground] Full jobData:', JSON.stringify(jobData, null, 2));
+          
+          // Try to get accountId from jobData to look up user info
+          const accountIdToLookup = finalRequestedBy?.accountId || finalRequestedBy?.id || jobData.requestedBy?.accountId || jobData.requestedBy?.id;
+          
+          if (accountIdToLookup) {
+            // Try to retrieve user info from separate storage using accountId
+            try {
+              const userStorageKey = `user-info-${accountIdToLookup}`;
+              const storedUserInfo = await storage.get(userStorageKey);
+              if (storedUserInfo) {
+                finalRequestedBy = storedUserInfo;
+                console.log('[pollVideoStatusBackground] ✅ Retrieved user info from separate storage:', finalRequestedBy);
+              } else {
+                console.warn('[pollVideoStatusBackground] User info not found in separate storage for accountId:', accountIdToLookup);
+              }
+            } catch (storageError) {
+              console.warn('[pollVideoStatusBackground] Failed to retrieve user info from storage:', storageError);
+            }
+          } else {
+            console.warn('[pollVideoStatusBackground] No accountId found to lookup user info');
+          }
+        }
+        
+        // Final check - log what we're passing
+        console.log('[pollVideoStatusBackground] Final requestedBy to pass:', JSON.stringify(finalRequestedBy, null, 2));
 
         // Check video status
         const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
@@ -1535,7 +1728,8 @@ resolver.define('pollVideoStatusBackground', async () => {
             console.log('[pollVideoStatusBackground] Processing completed video...');
             // Use asApp() since this is called from scheduled trigger (no user context)
             // Pass requestedBy from job metadata so we can attribute the comment
-            await processCompletedVideo(jobId, videoUrl, pageId, true, requestedBy);
+            console.log('[pollVideoStatusBackground] Calling processCompletedVideo with requestedBy:', finalRequestedBy);
+            await processCompletedVideo(jobId, videoUrl, pageId, true, finalRequestedBy);
             console.log('[pollVideoStatusBackground] ✅ Successfully processed completed video for job:', jobId);
             completed++;
           } else {
@@ -1600,25 +1794,165 @@ const resolverDefinitions = resolver.getDefinitions();
 // Get the pollVideoStatusBackground function from resolver
 const pollVideoStatusBackgroundFunc = resolverDefinitions['pollVideoStatusBackground'];
 
-// Wrapper function for scheduled trigger
+// Wrapper function for scheduled trigger - calls the resolver function directly
 const pollVideoStatusBackgroundWrapper = async ({ context }) => {
   try {
     console.log('[pollVideoStatusBackground] ========== SCHEDULED TRIGGER INVOKED ==========');
     console.log('[pollVideoStatusBackground] Context:', JSON.stringify(context, null, 2));
     console.log('[pollVideoStatusBackground] Timestamp:', new Date().toISOString());
     
-    // Get the resolver function
+    // Call the resolver function directly (it's defined with resolver.define but can be called directly)
+    // The resolver function doesn't use payload, so we call it with empty payload
     const resolverFunc = resolverDefinitions['pollVideoStatusBackground'];
     if (resolverFunc) {
-      return await resolverFunc({ context });
+      // Resolver functions expect { payload } but this one doesn't use it
+      return await resolverFunc({ payload: {}, context });
     }
     
-    // Fallback implementation if resolver not found
-    console.error('[pollVideoStatusBackground] Resolver function not found, using fallback');
-    return { error: 'Resolver function not found' };
+    // Fallback: call the polling logic directly
+    console.warn('[pollVideoStatusBackground] Resolver function not found in definitions, calling polling logic directly');
+    // Import the polling logic inline (it's already defined above)
+    return await pollVideoStatusBackgroundDirect();
   } catch (error) {
     console.error('[pollVideoStatusBackground] Error in scheduled trigger wrapper:', error);
     return { error: error?.message || 'Unknown error in scheduled trigger' };
+  }
+};
+
+// Direct implementation for scheduled trigger (extracted from resolver.define)
+const pollVideoStatusBackgroundDirect = async () => {
+  try {
+    console.log('[pollVideoStatusBackground] Starting background polling (direct call)');
+    
+    const API_KEY = process.env.GOLPO_API_KEY || 'api-key';
+    if (!API_KEY || API_KEY === 'api-key') {
+      console.error('[pollVideoStatusBackground] Golpo API key not configured');
+      return { error: 'API key not configured', processed: 0 };
+    }
+    // Get list of active jobs
+    const activeJobsKey = 'active-video-jobs';
+    const activeJobs = await storage.get(activeJobsKey) || [];
+    
+    if (activeJobs.length === 0) {
+      console.log('[pollVideoStatusBackground] No active jobs to poll');
+      return { message: 'No active jobs', processed: 0 };
+    }
+
+    console.log('[pollVideoStatusBackground] Found active jobs:', activeJobs.length);
+
+    let processed = 0;
+    let completed = 0;
+    let failed = 0;
+    const remainingJobs = [];
+
+    // Poll each active job (same logic as resolver function)
+    for (const jobId of activeJobs) {
+      try {
+        const jobKey = `video-job-${jobId}`;
+        const jobData = await storage.get(jobKey);
+        
+        if (!jobData) {
+          console.warn('[pollVideoStatusBackground] Job data not found for:', jobId);
+          continue;
+        }
+
+        const { pageId, requestedBy } = jobData;
+        if (!pageId) {
+          console.warn('[pollVideoStatusBackground] Page ID missing for job:', jobId);
+          continue;
+        }
+        
+        // Get final requestedBy (same logic as resolver)
+        let finalRequestedBy = requestedBy;
+        if (!finalRequestedBy && jobData.requestedBy) {
+          finalRequestedBy = jobData.requestedBy;
+        }
+        
+        if (!finalRequestedBy || (!finalRequestedBy.displayName && !finalRequestedBy.publicName && !finalRequestedBy.name && !finalRequestedBy.username)) {
+          const accountIdToLookup = finalRequestedBy?.accountId || finalRequestedBy?.id || jobData.requestedBy?.accountId || jobData.requestedBy?.id;
+          if (accountIdToLookup) {
+            try {
+              const userStorageKey = `user-info-${accountIdToLookup}`;
+              const storedUserInfo = await storage.get(userStorageKey);
+              if (storedUserInfo) {
+                finalRequestedBy = storedUserInfo;
+              }
+            } catch (storageError) {
+              console.warn('[pollVideoStatusBackground] Failed to retrieve user info from storage:', storageError);
+            }
+          }
+        }
+
+        // Check video status
+        const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
+        const response = await fetch(statusUrl, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': API_KEY
+          }
+        });
+
+        if (!response.ok) {
+          console.warn('[pollVideoStatusBackground] Status check failed for job:', jobId, response.status);
+          remainingJobs.push(jobId);
+          continue;
+        }
+
+        let statusData;
+        try {
+          statusData = await response.json();
+        } catch (jsonError) {
+          console.error('[pollVideoStatusBackground] Failed to parse status response JSON:', jsonError);
+          remainingJobs.push(jobId);
+          continue;
+        }
+        processed++;
+
+        // Check if video is ready
+        if (isVideoReady(statusData)) {
+          const videoUrl = extractVideoUrlFromStatus(statusData);
+          if (videoUrl) {
+            await processCompletedVideo(jobId, videoUrl, pageId, true, finalRequestedBy);
+            completed++;
+          } else {
+            remainingJobs.push(jobId);
+          }
+        } else if (isVideoFailed(statusData)) {
+          // Remove failed job
+          try {
+            await storage.delete(jobKey);
+            const updatedJobs = activeJobs.filter(id => id !== jobId);
+            await storage.set(activeJobsKey, updatedJobs);
+          } catch (cleanupError) {
+            console.warn('[pollVideoStatusBackground] Failed to cleanup failed job:', cleanupError);
+          }
+          failed++;
+        } else {
+          remainingJobs.push(jobId);
+        }
+      } catch (jobError) {
+        console.error('[pollVideoStatusBackground] Error processing job:', jobId, jobError);
+        remainingJobs.push(jobId);
+      }
+    }
+
+    // Update active jobs list
+    try {
+      await storage.set(activeJobsKey, remainingJobs);
+    } catch (storageError) {
+      console.error('[pollVideoStatusBackground] Failed to update active jobs list:', storageError);
+    }
+
+    return {
+      processed,
+      completed,
+      failed,
+      remaining: remainingJobs.length
+    };
+  } catch (error) {
+    console.error('[pollVideoStatusBackground] Error in background polling:', error);
+    return { error: error.message };
   }
 };
 

@@ -12,7 +12,7 @@ const durationOptions = [
   { label: "1 min", minutes: 1 },
   { label: "2 min", minutes: 2 },
   { label: "3 min", minutes: 3 },
-  { label: "5 min", minutes: 5 },
+  { label: "4 min", minutes: 5 },
 ];
 const languageOptions = [
   "English",
@@ -709,6 +709,14 @@ function App() {
   const completionCheckIntervalRef = useRef(null);
   const videoObjectUrlRef = useRef(null);
   const videoElementRef = useRef(null);
+  
+  // Function to clear the completion check interval
+  const clearCompletionCheckInterval = useCallback(() => {
+    if (completionCheckIntervalRef.current) {
+      clearInterval(completionCheckIntervalRef.current);
+      completionCheckIntervalRef.current = null;
+    }
+  }, []);
   const cleanupVideoObjectUrl = useCallback(() => {
     if (videoObjectUrlRef.current) {
       URL.revokeObjectURL(videoObjectUrlRef.current);
@@ -772,7 +780,7 @@ function App() {
             setTimeout(() => setCopyUrlMessage(""), 6000);
           } else {
             setCopyUrlMessage("Unable to load video preview. Use 'Play video' or 'Download video' buttons to access it.");
-            setTimeout(() => setCopyUrlMessage(""), 5000);
+          setTimeout(() => setCopyUrlMessage(""), 5000);
           }
           
           // Don't fall back to direct URL - it will violate CSP
@@ -939,6 +947,25 @@ function App() {
 
       setVideoReadyInfo(normalizedInfo);
       prepareVideoSource(videoUrl);
+      
+      // Show completion popup when video is ready
+      if (videoUrl) {
+        setCompletedVideoUrl(videoUrl);
+        
+        // Update status to "Complete" first
+        setVideoStatusMessage("Status: Complete");
+        
+        // Wait a moment to show "Status: Complete" before closing
+        setTimeout(() => {
+          setShowVideoCompletionModal(true);
+          setIsGeneratingVideo(false);
+          setIsPollingVideoStatus(false);
+          setVideoStatusMessage("");
+          console.log("[GolpoAI] handleVideoReady: Showing completion popup for video:", videoUrl);
+        }, 1500); // Show "Complete" status for 1.5 seconds
+      }
+      
+      // Also show the video ready modal
       setShowVideoReadyModal(true);
       // Note: latestVideoUrl will be fetched from comments after page refresh
       // Do not set it directly here - only fetch from comments
@@ -1369,11 +1396,11 @@ function App() {
       if (isPayloadTooLarge || isTimeoutOrKilled) {
         setCopyUrlMessage("Video file is too large. Opening in new tab for download...");
         // Fallback: open in new tab for download
-        setTimeout(() => {
-          setCopyUrlMessage("");
-          openInNewTab(remoteUrl);
-        }, 2000);
-        return;
+      setTimeout(() => {
+        setCopyUrlMessage("");
+        openInNewTab(remoteUrl);
+      }, 2000);
+      return;
       }
     }
 
@@ -1478,7 +1505,7 @@ function App() {
             console.log("[GolpoAI] Retrying backend API in " + delay + "ms...");
             setTimeout(() => fetchPageInfo(retryCount + 1), delay);
             return; // Exit early to retry
-          } else {
+        } else {
             throw new Error("Backend API failed after retries: " + invokeError.message);
           }
         }
@@ -1518,19 +1545,19 @@ function App() {
             console.log("[GolpoAI] All backend API retries exhausted, trying fallback methods");
             // Fallback to getContext() - check if it's available first
             if (typeof getContext === 'function') {
-              try {
-                const context = await getContext();
-                console.log("[GolpoAI] fetchPageInfo: getContext() result:", JSON.stringify(context, null, 2));
-                const pageId = extractPageIdFromContext(context);
-                if (pageId) {
-                  pageInfo = {
-                    id: pageId,
-                    title: context.content?.title || context.extension?.content?.title || "Page",
-                    type: context.content?.type || context.extension?.content?.type || "page"
-                  };
-                  console.log("[GolpoAI] fetchPageInfo: Got page info from getContext()", pageInfo);
-                }
-              } catch (contextErr) {
+            try {
+              const context = await getContext();
+              console.log("[GolpoAI] fetchPageInfo: getContext() result:", JSON.stringify(context, null, 2));
+              const pageId = extractPageIdFromContext(context);
+              if (pageId) {
+                pageInfo = {
+                  id: pageId,
+                  title: context.content?.title || context.extension?.content?.title || "Page",
+                  type: context.content?.type || context.extension?.content?.type || "page"
+                };
+                console.log("[GolpoAI] fetchPageInfo: Got page info from getContext()", pageInfo);
+              }
+            } catch (contextErr) {
                 console.log("[GolpoAI] fetchPageInfo: getContext() failed, trying URL (non-critical):", contextErr.message);
                 const pageIdFromUrl = getPageIdFromUrl();
                 if (pageIdFromUrl) {
@@ -1578,6 +1605,25 @@ function App() {
                 setLatestVideoUrl(latestUrl);
                 setCurrentVideoIndex(allUrls.length - 1);
                 console.log("[GolpoAI] Latest video URL set from newest comment:", latestUrl);
+                
+                // Check if user had a video generation in progress (stored in localStorage)
+                const storedJobId = localStorage.getItem('golpo_video_job_id');
+                const storedPageId = localStorage.getItem('golpo_video_page_id');
+                
+                // If there was a job in progress and we're on the same page, show completion popup
+                if (storedJobId && storedPageId === fullPageInfo.id && latestUrl) {
+                  // Check if this is a new video (not seen before)
+                  const lastSeenUrl = localStorage.getItem('golpo_last_seen_video_url');
+                  if (latestUrl !== lastSeenUrl) {
+                    console.log("[GolpoAI] Video generation completed while user was away! Showing popup");
+                    setCompletedVideoUrl(latestUrl);
+                    setShowVideoCompletionModal(true);
+                    // Clear stored job ID since video is complete
+                    localStorage.removeItem('golpo_video_job_id');
+                    localStorage.removeItem('golpo_video_page_id');
+                    localStorage.setItem('golpo_last_seen_video_url', latestUrl);
+                  }
+                }
               }
               
               // Check for any pending video jobs and trigger background polling
@@ -1643,7 +1689,7 @@ function App() {
       }
     };
     // Fetch immediately when UI loads (no delay)
-    fetchPageInfo();
+      fetchPageInfo();
   }, [isBylineItem]);
 
   // Resolve page ID from various sources
@@ -2087,53 +2133,129 @@ function App() {
         setIsGeneratingVideo(true);
         setVideoStatusMessage("Status: Processing - Video generation in progress...");
         
-        // Store current latest URL to detect when new video appears
-        previousLatestUrlRef.current = latestVideoUrl;
+        // Store job ID and page ID in localStorage to detect completion on return
+        const pageId = documentPayload?.id || pages[0]?.id || golpoAIDocument?.pageId;
+        if (pageId && pageId !== "unknown" && pageId !== "current") {
+          try {
+            localStorage.setItem('golpo_video_job_id', generatedJobId);
+            localStorage.setItem('golpo_video_page_id', pageId);
+            console.log("[GolpoAI] Stored video job info in localStorage for return detection");
+          } catch (storageError) {
+            console.warn("[GolpoAI] Failed to store job info in localStorage:", storageError);
+          }
+        }
         
-        // Start checking for completion periodically (every 30 seconds)
+        // Store current latest URL to detect when new video appears
+        // Initialize with current latestVideoUrl or empty string to detect new videos
+        const initialUrl = latestVideoUrl || "";
+        previousLatestUrlRef.current = initialUrl;
+        if (latestVideoUrl) {
+          try {
+            localStorage.setItem('golpo_last_seen_video_url', latestVideoUrl);
+          } catch (storageError) {
+            console.warn("[GolpoAI] Failed to store last seen URL:", storageError);
+          }
+        }
+        
+        // Start checking for completion periodically (every 15 seconds)
         if (completionCheckIntervalRef.current) {
           clearInterval(completionCheckIntervalRef.current);
         }
-        completionCheckIntervalRef.current = setInterval(async () => {
+        console.log("[GolpoAI] Starting completion check interval for job:", generatedJobId, "Initial URL:", initialUrl);
+        
+        // Define the check function to reuse it
+        const checkForCompletion = async () => {
           try {
-            const pageId = documentPayload?.id || pages[0]?.id || golpoAIDocument?.pageId;
-            if (pageId && pageId !== "unknown" && pageId !== "current") {
-              const footerResponse = await safeInvoke("getFooterComments", { pageId: pageId });
-              const latestComments = footerResponse?.body?.results || [];
-              const allUrls = extractAllVideoUrls(null, latestComments);
+            // Get current videoJobId from state (it might have changed)
+            const currentJobId = videoJobId || generatedJobId;
+            if (!currentJobId) {
+              console.log("[GolpoAI] No job ID available, skipping completion check");
+              return;
+            }
+            
+            console.log("[GolpoAI] Checking video status from Golpo API, jobId:", currentJobId);
+            
+            // Check video status directly from Golpo API instead of comments
+            const statusResponse = await safeInvoke("getVideoStatus", { jobId: currentJobId });
+            const statusPayload = statusResponse?.body || statusResponse;
+            
+            if (!statusPayload) {
+              console.log("[GolpoAI] No status response received");
+              return;
+            }
+            
+            // Extract status from response
+            const status = statusPayload?.status || 
+                          statusPayload?.data?.status || 
+                          statusPayload?.job_status || 
+                          statusPayload?.state || 
+                          "";
+            
+            console.log("[GolpoAI] Video status:", status);
+            
+            // Check if video is ready
+            if (isSuccessStatus(status)) {
+              // Extract video URL from status response
+              const videoUrl = extractVideoUrlFromPayload(statusPayload);
               
-              if (allUrls.length > 0) {
-                const newLatestUrl = allUrls[allUrls.length - 1];
-                const previousUrl = previousLatestUrlRef.current;
+              if (videoUrl) {
+                console.log("[GolpoAI] ✅ Video completed! URL:", videoUrl);
                 
-                // If we have a new video URL that's different from previous, show completion
-                if (newLatestUrl && newLatestUrl !== previousUrl && videoJobId) {
-                  console.log("[GolpoAI] New video detected! Showing completion popup");
-                  setLatestVideoUrl(newLatestUrl);
-                  setAllVideoUrls(allUrls);
-                  setCompletedVideoUrl(newLatestUrl);
+                // Update state with video URL
+                setLatestVideoUrl(videoUrl);
+                setCompletedVideoUrl(videoUrl);
+                
+                // Update status to "Complete" immediately - keep loader visible with this status
+                setVideoStatusMessage("Status: Complete");
+                console.log("[GolpoAI] Status updated to Complete");
+                
+                // Clear the interval first to prevent multiple triggers
+                if (completionCheckIntervalRef.current) {
+                  clearInterval(completionCheckIntervalRef.current);
+                  completionCheckIntervalRef.current = null;
+                }
+                
+                // Always show completion popup when video is generated
+                // Wait 2 seconds to show "Status: Complete" in loader, then show completion popup
+                setTimeout(() => {
+                  console.log("[GolpoAI] Showing completion popup");
+                  console.log("[GolpoAI] completedVideoUrl:", videoUrl);
+                  console.log("[GolpoAI] Setting showVideoCompletionModal to true");
+                  // Ensure completedVideoUrl is set before showing modal
+                  setCompletedVideoUrl(videoUrl);
                   setShowVideoCompletionModal(true);
                   setIsGeneratingVideo(false);
                   setIsPollingVideoStatus(false);
-                  setVideoStatusMessage("");
-                  previousLatestUrlRef.current = newLatestUrl;
-                  
-                  // Clear the interval
-                  if (completionCheckIntervalRef.current) {
-                    clearInterval(completionCheckIntervalRef.current);
-                    completionCheckIntervalRef.current = null;
-                  }
-                } else {
-                  // Update latest URL but don't show completion yet
-                  setLatestVideoUrl(newLatestUrl);
-                  setAllVideoUrls(allUrls);
-                }
+                  // Keep status message visible briefly, then clear it
+                  setTimeout(() => {
+                    setVideoStatusMessage("");
+                  }, 500);
+                  previousLatestUrlRef.current = videoUrl;
+                  console.log("[GolpoAI] Completion popup should now be visible");
+                }, 2000); // Show "Complete" status for 2 seconds, then show completion popup
+              } else {
+                console.log("[GolpoAI] Video status is complete but no URL found in response");
               }
+            } else if (isFailureStatus(status)) {
+              console.log("[GolpoAI] Video generation failed with status:", status);
+              setVideoStatusMessage("Status: Failed");
+              // Clear the interval on failure
+              if (completionCheckIntervalRef.current) {
+                clearInterval(completionCheckIntervalRef.current);
+                completionCheckIntervalRef.current = null;
+              }
+            } else {
+              console.log("[GolpoAI] Video still processing, status:", status);
+              setVideoStatusMessage("Status: Processing - Video generation in progress...");
             }
           } catch (checkError) {
-            console.warn("[GolpoAI] Error checking for video completion:", checkError);
+            console.error("[GolpoAI] Error checking for video completion:", checkError);
           }
-        }, 30000); // Check every 30 seconds
+        };
+        
+        // Run immediate check first, then set up interval
+        checkForCompletion();
+        completionCheckIntervalRef.current = setInterval(checkForCompletion, 15000); // Check every 15 seconds for faster detection
       } else {
         console.warn("[GolpoAI] handleGenerateVideo: No job id or video URL returned, showing raw response");
         handleVideoReady(responseBody);
@@ -2324,10 +2446,10 @@ function App() {
 
         {latestVideoUrl && (
           <section style={currentStyles.latestVideoCard}>
-            <p style={currentStyles.latestVideoSubtitle}>Most recent link generated on this page.</p>
-            <a
-              href={latestVideoUrl}
-              style={currentStyles.latestVideoUrlLink}
+                <p style={currentStyles.latestVideoSubtitle}>Most recent link generated on this page.</p>
+              <a
+                href={latestVideoUrl}
+                style={currentStyles.latestVideoUrlLink}
               onClick={async (e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -2358,13 +2480,13 @@ function App() {
                   setIsLoadingVideo(false);
                 }
               }}
-            >
-              {latestVideoUrl}
-            </a>
+              >
+                {latestVideoUrl}
+              </a>
             {copyUrlMessage && (
               <div style={styles.copyUrlToast}>
                 {copyUrlMessage}
-              </div>
+            </div>
             )}
           </section>
         )}
@@ -2635,9 +2757,7 @@ function App() {
                     onChange={(e) => setIncludeLogo(e.target.checked)}
                     style={styles.formCheckbox}
                   />
-                  <label htmlFor="includeLogo" style={styles.formCheckboxLabel}>
-                    Include company logo
-                  </label>
+                  
                 </div>
               </div>
 
@@ -2721,7 +2841,9 @@ function App() {
             </button>
             <div style={styles.loadingSpinner} />
             
-            <h3 style={styles.loadingTitle}>Generating your Golpo video</h3>
+            <h3 style={styles.loadingTitle}>
+              {videoStatusMessage === "Status: Complete" ? "Video generation complete!" : "Generating your Golpo video"}
+            </h3>
             {videoStatusMessage && (
               <p style={styles.loadingMessage}>{videoStatusMessage}</p>
             )}
@@ -2731,9 +2853,9 @@ function App() {
             <p style={styles.loadingSubtext}>
               {videoJobId ? (
                 <>
-                  Video generation may take some time (usually 5-10 minutes).
+                  Video generation will take some time .
                   <br />
-                  <strong>You can close this window - the video will be saved in page comments when ready!</strong>
+                  <strong>You can close this window - the video will be saved to page comments when ready!</strong>
                 </>
               ) : (
                 <>
@@ -2745,7 +2867,7 @@ function App() {
         </div>
       )}
 
-      {showVideoCompletionModal && completedVideoUrl && (
+      {showVideoCompletionModal && (
         <div style={styles.videoReadyOverlay}>
           <div style={styles.videoReadyCard}>
             <button
@@ -2780,33 +2902,64 @@ function App() {
                   />
                 </svg>
               </div>
-              <h2 style={styles.modalTitle}>Video Generation Complete!</h2>
+              <h2 style={styles.modalTitle}>Your video is ready!</h2>
             </div>
             <div style={styles.modalBody}>
-              <p style={{ marginBottom: 16, color: "#475569" }}>
-                Your video has been generated and saved in the page comments.
+              <p style={{ marginBottom: 12, color: "#475569", lineHeight: 1.6 }}>
+                Your Golpo AI video has been generated and the link has been added to this page's comments.
               </p>
-              <div style={{ background: "#f8f5ff", padding: 12, borderRadius: 8, marginBottom: 16 }}>
-                <p style={{ margin: 0, fontSize: 12, color: "#3b2d71", wordBreak: "break-all" }}>
-                  {completedVideoUrl}
-                </p>
-              </div>
+              <p style={{ marginBottom: 20, color: "#475569", lineHeight: 1.6 }}>
+                You can scroll to the latest comment to view the video link, or use the buttons below.
+              </p>
               <div style={styles.modalActions}>
                 <button
                   style={styles.modalPrimaryButton}
-                  onClick={() => {
-                    handleCopyVideoUrl(completedVideoUrl);
+                  onClick={async () => {
+                    // Use completedVideoUrl or latestVideoUrl directly - same as automatic preview
+                    const videoUrlToPlay = completedVideoUrl || latestVideoUrl || allVideoUrls[allVideoUrls.length - 1];
+                    
+                    if (!videoUrlToPlay) {
+                      setCopyUrlMessage("Video URL not found. Please check the comments section.");
+                      setTimeout(() => setCopyUrlMessage(""), 3000);
+                      return;
+                    }
+                    
+                    setShowVideoCompletionModal(false);
+                    setIsLoadingVideo(true);
+                    setError("");
+                    
+                    try {
+                      // Set up video ready info and show video preview modal
+                      const normalizedInfo = {
+                        jobId: videoJobId,
+                        videoUrl: videoUrlToPlay,
+                        downloadUrl: videoUrlToPlay,
+                        status: "completed",
+                        raw: { video_url: videoUrlToPlay }
+                      };
+                      setVideoReadyInfo(normalizedInfo);
+                      await prepareVideoSource(videoUrlToPlay);
+                      setShowVideoReadyModal(true);
+                      setCompletedVideoUrl(null);
+                      clearCompletionCheckInterval();
+                    } catch (err) {
+                      console.error("[GolpoAI] Open video failed:", err);
+                      setError(err?.message || "Unable to load video. Please try again.");
+                      setIsLoadingVideo(false);
+                    }
                   }}
                 >
-                  Copy URL
+                  Open video
                 </button>
                 <button
                   style={styles.modalSecondaryButton}
                   onClick={() => {
-                    window.open(completedVideoUrl, '_blank');
+                    setShowVideoCompletionModal(false);
+                    setCompletedVideoUrl(null);
+                    clearCompletionCheckInterval();
                   }}
                 >
-                  Open Video
+                  OK
                 </button>
               </div>
             </div>
@@ -2840,63 +2993,63 @@ function App() {
               >
                 Cancel
               </button>
-               <button
-                 style={styles.videoExistsGoToButton}
-                 onClick={async () => {
-                   setShowVideoExistsModal(false);
+              <button
+                style={styles.videoExistsGoToButton}
+                onClick={async () => {
+                  setShowVideoExistsModal(false);
                    setIsLoadingVideo(true);
                    setError("");
-                   
-                   try {
-                     // Fetch page ID using the same logic as openModal
-                     let targetId = await resolvePageId();
-                     
-                     if (!targetId) {
-                       // Try fallback methods
-                       try {
-                         const currentPage = await safeInvoke("getCurrentPage", {});
-                         if (currentPage?.id && currentPage.id !== "unknown" && currentPage.id !== "current") {
-                           targetId = currentPage.id;
-                         }
-                       } catch (invokeErr) {
-                         if (invokeErr.message !== "INVOKE_NOT_AVAILABLE") {
-                           console.warn("[GolpoAI] Go to Video: getCurrentPage failed:", invokeErr);
-                         }
-                       }
-                       
-                       if (!targetId) {
-                         try {
-                           const context = await getContext();
-                           const pageId = extractPageIdFromContext(context);
-                           if (pageId) {
-                             targetId = pageId;
-                           }
-                         } catch (contextErr) {
-                           console.warn("[GolpoAI] Go to Video: getContext() failed:", contextErr);
-                         }
-                       }
-                       
-                       if (!targetId) {
-                         targetId = getPageIdFromUrl();
-                       }
-                     }
-                     
-                     if (!targetId) {
-                       setError("Unable to fetch page ID. Please try again.");
+                  
+                  try {
+                    // Fetch page ID using the same logic as openModal
+                    let targetId = await resolvePageId();
+                    
+                    if (!targetId) {
+                      // Try fallback methods
+                      try {
+                        const currentPage = await safeInvoke("getCurrentPage", {});
+                        if (currentPage?.id && currentPage.id !== "unknown" && currentPage.id !== "current") {
+                          targetId = currentPage.id;
+                        }
+                      } catch (invokeErr) {
+                        if (invokeErr.message !== "INVOKE_NOT_AVAILABLE") {
+                          console.warn("[GolpoAI] Go to Video: getCurrentPage failed:", invokeErr);
+                        }
+                      }
+                      
+                      if (!targetId) {
+                        try {
+                          const context = await getContext();
+                          const pageId = extractPageIdFromContext(context);
+                          if (pageId) {
+                            targetId = pageId;
+                          }
+                        } catch (contextErr) {
+                          console.warn("[GolpoAI] Go to Video: getContext() failed:", contextErr);
+                        }
+                      }
+                      
+                      if (!targetId) {
+                        targetId = getPageIdFromUrl();
+                      }
+                    }
+                    
+                    if (!targetId) {
+                      setError("Unable to fetch page ID. Please try again.");
                        setIsLoadingVideo(false);
-                       return;
-                     }
-                     
-                     // Fetch page content to get the latest video URL
-                     const pageResponse = await safeInvoke("getPageById", { pageId: targetId });
-                     const pageBody = pageResponse?.body;
-                     
-                     if (!pageBody) {
-                       setError("Unable to fetch page content. Please try again.");
+                      return;
+                    }
+                    
+                    // Fetch page content to get the latest video URL
+                    const pageResponse = await safeInvoke("getPageById", { pageId: targetId });
+                    const pageBody = pageResponse?.body;
+                    
+                    if (!pageBody) {
+                      setError("Unable to fetch page content. Please try again.");
                        setIsLoadingVideo(false);
-                       return;
-                     }
-                     
+                      return;
+                    }
+                    
                      // Extract all video URLs from page body and comments
                      const footerResponse = await safeInvoke("getFooterComments", { pageId: targetId });
                      const footerResult = footerResponse?.body?.results || [];
@@ -2905,32 +3058,32 @@ function App() {
                      if (allUrls.length === 0) {
                        setError("No videos found on this page.");
                        setIsLoadingVideo(false);
-                       return;
-                     }
+                      return;
+                    }
                      
                      setAllVideoUrls(allUrls);
                      // Use last video (newest since comments are added at the end)
                      const recentVideoUrl = allUrls[allUrls.length - 1];
                      setCurrentVideoIndex(allUrls.length - 1);
-                     
-                     // Set up video ready info and show video preview modal
-                     const normalizedInfo = {
-                       jobId: null,
-                       videoUrl: recentVideoUrl,
-                       downloadUrl: recentVideoUrl,
-                       status: "completed",
-                       raw: { video_url: recentVideoUrl }
-                     };
-                     setVideoReadyInfo(normalizedInfo);
-                     await prepareVideoSource(recentVideoUrl);
-                     setShowVideoReadyModal(true);
-                   } catch (err) {
-                     console.error("[GolpoAI] Go to Video failed:", err);
-                     setError(err?.message || "Unable to fetch video. Please try again.");
+                    
+                    // Set up video ready info and show video preview modal
+                    const normalizedInfo = {
+                      jobId: null,
+                      videoUrl: recentVideoUrl,
+                      downloadUrl: recentVideoUrl,
+                      status: "completed",
+                      raw: { video_url: recentVideoUrl }
+                    };
+                    setVideoReadyInfo(normalizedInfo);
+                    await prepareVideoSource(recentVideoUrl);
+                    setShowVideoReadyModal(true);
+                  } catch (err) {
+                    console.error("[GolpoAI] Go to Video failed:", err);
+                    setError(err?.message || "Unable to fetch video. Please try again.");
                      setIsLoadingVideo(false);
-                   }
-                 }}
-               >
+                  }
+                }}
+              >
                 <span style={styles.videoExistsPlayIcon}>▶</span>
                 Go to Video
               </button>
@@ -3093,21 +3246,21 @@ function App() {
                   >
                     Play video
                   </button>
-                  <button
-                    style={{
-                      ...styles.videoReadyPrimaryButton,
+                    <button
+                      style={{
+                        ...styles.videoReadyPrimaryButton,
                       ...(isBylineItem ? styles.videoActionDisabled : {}),
                       flex: "none",
                       minWidth: "auto",
                       padding: "8px 16px",
                       fontSize: "14px",
-                    }}
-                    onClick={handleDownloadVideo}
-                    disabled={isBylineItem}
-                    title={isBylineItem ? "Open Golpo AI from page actions to download video" : undefined}
-                  >
-                    Download video
-                  </button>
+                      }}
+                      onClick={handleDownloadVideo}
+                      disabled={isBylineItem}
+                      title={isBylineItem ? "Open Golpo AI from page actions to download video" : undefined}
+                    >
+                      Download video
+                    </button>
                 </div>
                 {copyUrlMessage && (
                   <div style={styles.copyUrlToast}>
