@@ -610,9 +610,10 @@ function App() {
   const [duration, setDuration] = useState(durationOptions[1].minutes.toString());
   const [voice, setVoice] = useState("Solo Female");
   const [language, setLanguage] = useState("English");
-  const [includeLogo, setIncludeLogo] = useState(false);
+  const [useColor, setUseColor] = useState(false);
   const [music, setMusic] = useState("engaging");
   const [style, setStyle] = useState("");
+  const [useIframeForVideo, setUseIframeForVideo] = useState(false);
   const selectedDurationOption = useMemo(
     () => durationOptions.find((option) => option.minutes.toString() === duration) ?? durationOptions[1],
     [duration]
@@ -709,6 +710,8 @@ function App() {
   const completionCheckIntervalRef = useRef(null);
   const videoObjectUrlRef = useRef(null);
   const videoElementRef = useRef(null);
+  const fullscreenVideoRef = useRef(null);
+  const [isFullscreenVideo, setIsFullscreenVideo] = useState(false);
   
   // Function to clear the completion check interval
   const clearCompletionCheckInterval = useCallback(() => {
@@ -725,80 +728,698 @@ function App() {
     setVideoPlayerUrl(null);
   }, []);
 
+  const copyUrlToClipboardFallback = useCallback((url, download = false, customMessage = null) => {
+    const message = customMessage || (download 
+      ? "Video URL copied to clipboard. Paste in your browser address bar to download."
+      : "Video URL copied to clipboard. Paste in a new tab to open the video.");
+    
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(() => {
+        setCopyUrlMessage(message);
+        setTimeout(() => setCopyUrlMessage(""), 7000);
+      }).catch(() => {
+        // Fallback for browsers without clipboard API
+        const textArea = document.createElement("textarea");
+        textArea.value = url;
+        textArea.style.position = "fixed";
+        textArea.style.left = "-9999px";
+        textArea.style.top = "0";
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        try {
+          document.execCommand('copy');
+          setCopyUrlMessage(message);
+          setTimeout(() => setCopyUrlMessage(""), 7000);
+        } catch (err) {
+          setCopyUrlMessage(`Please copy this URL: ${url}`);
+          setTimeout(() => setCopyUrlMessage(""), 10000);
+        }
+        document.body.removeChild(textArea);
+      });
+    } else {
+      // Fallback for older browsers
+      const textArea = document.createElement("textarea");
+      textArea.value = url;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-9999px";
+      textArea.style.top = "0";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        setCopyUrlMessage(message);
+        setTimeout(() => setCopyUrlMessage(""), 7000);
+      } catch (err) {
+        setCopyUrlMessage(`Please copy this URL: ${url}`);
+        setTimeout(() => setCopyUrlMessage(""), 10000);
+      }
+      document.body.removeChild(textArea);
+    }
+  }, []);
+
+  // Chunked download/play function - downloads video in chunks to bypass Forge's 5MB limit
+  // Dynamically calculates optimal chunk size to handle any file size safely
+  // Accounts for base64 encoding overhead (~33% increase) to stay under 5MB limit
+  // Chunked download function - downloads video in chunks to bypass Forge's 5MB limit
+  // Dynamically calculates optimal chunk size to handle any file size safely
+  // Accounts for base64 encoding overhead (~33% increase) to stay under 5MB limit
+  const downloadVideoInChunks = useCallback(async (videoUrl, contentType = 'video/mp4', forPlayback = false, jobId = null) => {
+    // Forge's GraphQL response limit: 5,242,880 bytes (5MB)
+    const FORGE_RESPONSE_LIMIT = 5 * 1024 * 1024; // 5,242,880 bytes
+   
+    // Base64 encoding increases size by ~33% (4/3 ratio)
+    // Calculate maximum safe raw chunk size: limit / (4/3) = limit * 0.75
+    // Using 0.73 (slightly more conservative) for safety margin
+    const MAX_RAW_CHUNK_SIZE = Math.floor(FORGE_RESPONSE_LIMIT * 0.73);
+   
+    // For HTTP Range streaming (playback), use smaller chunks for faster initial load
+    // For downloads, use larger chunks for efficiency
+    const CHUNK_SIZE = forPlayback 
+      ? Math.min(1 * 1024 * 1024, MAX_RAW_CHUNK_SIZE) // 1MB chunks for streaming (faster start)
+      : MAX_RAW_CHUNK_SIZE; // 3.65MB chunks for downloads (more efficient)
+   
+    console.log(`[GolpoAI] Using HTTP Range streaming with chunk size: ${(CHUNK_SIZE / (1024 * 1024)).toFixed(2)}MB (${CHUNK_SIZE} bytes) for ${forPlayback ? 'playback' : 'download'}`);
+   
+    const chunks = [];
+    let totalSize = null;
+    let currentByte = 0;
+
+    if (forPlayback) {
+      setIsLoadingVideo(true);
+      setCopyUrlMessage('Preparing video...');
+    } else {
+      setCopyUrlMessage('Preparing download...');
+    }
+
+    // First, get the file size by fetching the first chunk
+    try {
+      const firstChunkResponse = await invoke('fetchVideoChunk', {
+        videoUrl,
+        startByte: 0,
+        endByte: CHUNK_SIZE - 1,
+      });
+
+      if (firstChunkResponse?.error || firstChunkResponse?.status >= 400) {
+        throw new Error(firstChunkResponse?.error || `Failed to fetch first chunk: ${firstChunkResponse?.status}`);
+      }
+
+      if (!firstChunkResponse?.base64Data) {
+        throw new Error('First chunk missing data');
+      }
+
+      totalSize = firstChunkResponse.totalSize;
+      chunks.push(base64ToBlob(firstChunkResponse.base64Data, contentType));
+      currentByte = firstChunkResponse.chunkSize;
+
+      console.log(`File size: ${totalSize || 'unknown'} bytes, downloaded: ${currentByte} bytes`);
+      
+      // For playback, ALWAYS use MediaSource API with HTTP Range streaming
+      // This provides true progressive streaming - video plays as it downloads
+      // Uses fetchVideoChunk (HTTP Range requests) to stream chunks progressively
+      const useMediaSource = forPlayback && window.MediaSource;
+      
+      if (useMediaSource) {
+        console.log(`[GolpoAI] Using HTTP Range streaming with MediaSource API for video playback (${(totalSize / (1024 * 1024)).toFixed(2)}MB)`);
+        try {
+          // Use MediaSource API - proxy (fetchVideoChunk) fetches from S3, we stream chunks progressively
+          const mediaSource = new MediaSource();
+          const blobUrl = URL.createObjectURL(mediaSource);
+          
+          // Set blob URL early so video element can start loading
+          videoObjectUrlRef.current = blobUrl;
+          setVideoPlayerUrlSafe(blobUrl); // Use safe setter
+          setIsLoadingVideo(false);
+          setCopyUrlMessage('Streaming video...');
+          
+          mediaSource.addEventListener('sourceopen', async () => {
+            try {
+              // Try common MP4 codecs
+              let sourceBuffer;
+              const codecs = [
+                'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
+                'video/mp4; codecs="avc1.4D001E, mp4a.40.2"',
+                'video/mp4; codecs="avc1.64001E, mp4a.40.2"',
+                'video/mp4'
+              ];
+              
+              for (const codec of codecs) {
+                try {
+                  sourceBuffer = mediaSource.addSourceBuffer(codec);
+                  console.log(`[GolpoAI] Using codec: ${codec}`);
+                  break;
+                } catch (e) {
+                  console.warn(`[GolpoAI] Codec ${codec} not supported, trying next...`);
+                }
+              }
+              
+              if (!sourceBuffer) {
+                throw new Error('No supported codec found');
+              }
+              
+              // Helper to wait for source buffer to be ready
+              const waitForBuffer = () => {
+                return new Promise(resolve => {
+                  if (!sourceBuffer.updating) {
+                    resolve();
+                  } else {
+                    sourceBuffer.addEventListener('updateend', resolve, { once: true });
+                  }
+                });
+              };
+              
+              // Add first chunk from proxy
+              await waitForBuffer();
+              const firstBlob = base64ToBlob(firstChunkResponse.base64Data, contentType);
+              const firstArrayBuffer = await firstBlob.arrayBuffer();
+              sourceBuffer.appendBuffer(firstArrayBuffer);
+              
+              // HTTP Range streaming: Fetch chunks progressively using Range requests
+              // Video plays as chunks are downloaded (true progressive streaming)
+              (async () => {
+                try {
+                  let streamByte = currentByte;
+                  const prefetchAhead = 2; // Prefetch 2 chunks ahead for smoother playback
+                  let nextChunkPromise = null;
+                  
+                  while (streamByte < totalSize) {
+                    // Wait for buffer to be ready
+                    await waitForBuffer();
+                    
+                    // If we have a prefetched chunk, use it
+                    if (nextChunkPromise) {
+                      const prefetched = await nextChunkPromise;
+                      if (prefetched) {
+                        await waitForBuffer();
+                        sourceBuffer.appendBuffer(prefetched.arrayBuffer);
+                        streamByte = prefetched.nextByte;
+                        nextChunkPromise = null;
+                        
+                        // Update progress
+                        const progress = Math.round((streamByte / totalSize) * 100);
+                        setCopyUrlMessage(`Streaming video... ${progress}%`);
+                        continue;
+                      }
+                    }
+                    
+                    // Fetch current chunk using HTTP Range request
+                    const endByte = Math.min(streamByte + CHUNK_SIZE - 1, totalSize - 1);
+                    console.log(`[GolpoAI] HTTP Range request: bytes=${streamByte}-${endByte}`);
+                    
+                    const chunkResponse = await invoke('fetchVideoChunk', {
+                      videoUrl,
+                      startByte: streamByte,
+                      endByte: endByte,
+                    });
+                    
+                    if (chunkResponse?.error || chunkResponse?.status >= 400) {
+                      throw new Error(chunkResponse?.error || `Failed to fetch chunk: ${chunkResponse?.status}`);
+                    }
+                    
+                    if (!chunkResponse?.base64Data) {
+                      break;
+                    }
+                    
+                    await waitForBuffer();
+                    const chunkBlob = base64ToBlob(chunkResponse.base64Data, contentType);
+                    const chunkArrayBuffer = await chunkBlob.arrayBuffer();
+                    sourceBuffer.appendBuffer(chunkArrayBuffer);
+                    streamByte += chunkResponse.chunkSize;
+                    
+                    // Prefetch next chunk(s) ahead for smoother playback
+                    if (streamByte < totalSize && prefetchAhead > 0) {
+                      const nextEndByte = Math.min(streamByte + CHUNK_SIZE - 1, totalSize - 1);
+                      nextChunkPromise = (async () => {
+                        try {
+                          const nextResponse = await invoke('fetchVideoChunk', {
+                            videoUrl,
+                            startByte: streamByte,
+                            endByte: nextEndByte,
+                          });
+                          if (nextResponse?.base64Data) {
+                            const nextBlob = base64ToBlob(nextResponse.base64Data, contentType);
+                            return {
+                              arrayBuffer: await nextBlob.arrayBuffer(),
+                              nextByte: streamByte + nextResponse.chunkSize
+                            };
+                          }
+                        } catch (e) {
+                          console.warn('[GolpoAI] Prefetch failed:', e);
+                        }
+                        return null;
+                      })();
+                    }
+                    
+                    // Update progress
+                    const progress = Math.round((streamByte / totalSize) * 100);
+                    setCopyUrlMessage(`Streaming video... ${progress}%`);
+                    
+                    if (streamByte >= totalSize) {
+                      break;
+                    }
+                  }
+                  
+                  // Wait for final append to complete
+                  await waitForBuffer();
+                  mediaSource.endOfStream();
+                  setCopyUrlMessage('');
+                  console.log(`[GolpoAI] ✅ HTTP Range streaming completed - video ready to play`);
+                } catch (streamError) {
+                  console.error('[GolpoAI] HTTP Range streaming error:', streamError);
+                  mediaSource.endOfStream('network');
+                  setCopyUrlMessage('Streaming error. Video may not play completely.');
+                }
+              })();
+              
+              return blobUrl;
+            } catch (initError) {
+              console.error('[GolpoAI] MediaSource initialization error:', initError);
+              mediaSource.endOfStream('network');
+              throw initError;
+            }
+          });
+          
+          return blobUrl;
+        } catch (mediaSourceError) {
+          console.warn('[GolpoAI] MediaSource API failed, falling back to blob approach:', mediaSourceError);
+          // Fall through to regular blob approach
+        }
+      }
+
+      // Update progress
+      if (totalSize) {
+        const progress = Math.round((currentByte / totalSize) * 100);
+        if (forPlayback) {
+          setCopyUrlMessage(`Loading video... ${progress}%`);
+        } else {
+          setCopyUrlMessage(`Downloading... ${progress}%`);
+        }
+      } else {
+        if (forPlayback) {
+          setCopyUrlMessage('Loading video...');
+        } else {
+          setCopyUrlMessage('Downloading...');
+        }
+      }
+
+      // Download remaining chunks
+      while (!totalSize || currentByte < totalSize) {
+        const endByte = totalSize
+          ? Math.min(currentByte + CHUNK_SIZE - 1, totalSize - 1)
+          : currentByte + CHUNK_SIZE - 1;
+
+        const chunkResponse = await invoke('fetchVideoChunk', {
+          videoUrl,
+          startByte: currentByte,
+          endByte: endByte,
+        });
+
+        if (chunkResponse?.error || chunkResponse?.status >= 400) {
+          throw new Error(chunkResponse?.error || `Failed to fetch chunk: ${chunkResponse?.status}`);
+        }
+
+        if (!chunkResponse?.base64Data) {
+          throw new Error('Chunk missing data');
+        }
+
+        chunks.push(base64ToBlob(chunkResponse.base64Data, contentType));
+        currentByte += chunkResponse.chunkSize;
+
+        // Update progress
+        if (totalSize) {
+          const progress = Math.round((currentByte / totalSize) * 100);
+          if (forPlayback) {
+            setCopyUrlMessage(`Loading video... ${progress}%`);
+          } else {
+            setCopyUrlMessage(`Downloading... ${progress}%`);
+          }
+        }
+
+        // If we got less data than requested, we've reached the end
+        if (chunkResponse.chunkSize < CHUNK_SIZE || (totalSize && currentByte >= totalSize)) {
+          break;
+        }
+
+        // Update total size if we got it from this chunk
+        if (chunkResponse.totalSize && !totalSize) {
+          totalSize = chunkResponse.totalSize;
+        }
+      }
+
+      // Combine all chunks into a single blob
+      if (forPlayback) {
+        setCopyUrlMessage('Assembling video...');
+      } else {
+        setCopyUrlMessage('Assembling video...');
+      }
+      const completeBlob = new Blob(chunks, { type: contentType });
+      const blobUrl = URL.createObjectURL(completeBlob);
+
+      if (forPlayback) {
+        // For playback, set the blob URL
+        console.log(`[GolpoAI] ✅ Large video chunked download complete! Setting blob URL for playback: ${blobUrl}, blob size: ${(completeBlob.size / (1024 * 1024)).toFixed(2)}MB`);
+        videoObjectUrlRef.current = blobUrl;
+        
+        // CRITICAL: Use safe setter to ensure only blob URLs are set
+        setVideoPlayerUrlSafe(blobUrl);
+        setIsLoadingVideo(false);
+        setCopyUrlMessage('');
+        
+        console.log(`[GolpoAI] ✅ Video loaded successfully: ${(completeBlob.size / (1024 * 1024)).toFixed(2)}MB, blob URL set for playback`);
+        console.log(`[GolpoAI] ✅ Blob URL: ${blobUrl}`);
+        console.log(`[GolpoAI] ✅ videoPlayerUrl should now be: ${blobUrl}`);
+        
+        // Force a small delay to ensure React state updates
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // Verify blob URL was set correctly
+        setTimeout(() => {
+          console.log(`[GolpoAI] ✅ Verification: videoPlayerUrl is now: ${videoPlayerUrl}`);
+          if (videoPlayerUrl === blobUrl || (videoPlayerUrl && videoPlayerUrl.startsWith('blob:'))) {
+            console.log(`[GolpoAI] ✅ Verified: videoPlayerUrl is correctly set to blob URL`);
+          } else {
+            console.warn(`[GolpoAI] ⚠️ Warning: videoPlayerUrl may not be set correctly. Expected: ${blobUrl}, Got: ${videoPlayerUrl}`);
+          }
+        }, 300);
+        
+        return blobUrl;
+      } else {
+        // For download, use friend's exact logic
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = `golpo-video-${videoJobId || jobId || Date.now()}.mp4`;
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+
+        // Cleanup
+        setTimeout(() => {
+          document.body.removeChild(link);
+          URL.revokeObjectURL(blobUrl);
+        }, 100);
+
+        setCopyUrlMessage('Downloaded!');
+        setTimeout(() => setCopyUrlMessage(''), 2000);
+        console.log(`Video download successful: ${completeBlob.size} bytes`);
+        return blobUrl;
+      }
+    } catch (error) {
+      console.error('Chunked download failed:', error);
+      setIsLoadingVideo(false);
+      setCopyUrlMessage('');
+      throw error;
+    }
+  }, [invoke, videoJobId]);
+
+  // Safe setter for videoPlayerUrl - prevents S3 URLs from being set (CSP violation)
+  // Allows Media API URLs, blob URLs, and data URLs
+  const setVideoPlayerUrlSafe = useCallback((urlToSet) => {
+    if (!urlToSet) {
+      setVideoPlayerUrl(null);
+      return;
+    }
+    
+    // NEVER allow S3 URLs - they violate CSP
+    if (urlToSet.includes('s3.amazonaws.com') || urlToSet.includes('s3.us-east-2.amazonaws.com')) {
+      console.error("[GolpoAI] BLOCKED: Attempted to set S3 URL to videoPlayerUrl - this would violate CSP!");
+      setVideoPlayerUrl(null);
+      return;
+    }
+    
+    // Allow Media API URLs (api.media.atlassian.com) - these are CSP-compliant
+    const isMediaApiUrl = urlToSet.includes('api.media.atlassian.com') || 
+                          urlToSet.includes('media.atlassian.com') ||
+                          urlToSet.includes('tdp-os.services.atlassian.com');
+    
+    // Allow blob:, data:, localhost, or Media API URLs
+    if (urlToSet.startsWith('blob:') || 
+        urlToSet.startsWith('data:') || 
+        urlToSet.startsWith('http://localhost') || 
+        urlToSet.startsWith('https://localhost') ||
+        isMediaApiUrl) {
+      setVideoPlayerUrl(urlToSet);
+      console.log("[GolpoAI] ✅ Set video URL (Media API or blob):", urlToSet.substring(0, 100));
+    } else {
+      console.warn("[GolpoAI] Blocked non-allowed URL from being set to videoPlayerUrl:", urlToSet);
+      setVideoPlayerUrl(null);
+    }
+  }, []);
+
+  // CRITICAL: Final safety net - monitor videoPlayerUrl and immediately clear any S3 URLs
+  // This prevents CSP violations even if something bypasses the safe setter
+  useEffect(() => {
+    if (videoPlayerUrl && (videoPlayerUrl.includes('s3.amazonaws.com') || videoPlayerUrl.includes('s3.us-east-2.amazonaws.com'))) {
+      console.error("[GolpoAI] EMERGENCY BLOCK: videoPlayerUrl contains S3 URL! Clearing immediately to prevent CSP violation:", videoPlayerUrl);
+      setVideoPlayerUrl(null);
+      setIsLoadingVideo(false);
+      setCopyUrlMessage("Video URL blocked for security. Using proxy method...");
+      // If we have a video URL from videoReadyInfo, retry with proxy
+      if (videoReadyInfo?.videoUrl) {
+        const videoUrl = videoReadyInfo.videoUrl;
+        console.log("[GolpoAI] Retrying with proxy resolver for:", videoUrl);
+        prepareVideoSource(videoUrl).catch(err => {
+          console.error("[GolpoAI] Proxy retry failed:", err);
+        });
+      }
+    }
+  }, [videoPlayerUrl, videoReadyInfo?.videoUrl, prepareVideoSource]);
+
+  // CRITICAL: Continuous monitor - check video element src every 100ms and clear S3 URLs
+  useEffect(() => {
+    if (!videoElementRef.current) return;
+    
+    const video = videoElementRef.current;
+    const checkInterval = setInterval(() => {
+      if (!video) return;
+      const currentSrc = video.src || video.getAttribute('src') || '';
+      
+      // If video element has S3 URL, clear it immediately
+      if (currentSrc && (currentSrc.includes('s3.amazonaws.com') || currentSrc.includes('s3.us-east-2.amazonaws.com'))) {
+        console.error("[GolpoAI] CONTINUOUS MONITOR: Video element has S3 URL! Clearing immediately:", currentSrc);
+        try {
+          video.src = '';
+          video.setAttribute('src', '');
+          video.removeAttribute('src');
+          video.load();
+          setVideoPlayerUrl(null);
+          
+          // Retry with prepareVideoSource if we have a video URL
+          if (videoReadyInfo?.videoUrl && !videoReadyInfo.videoUrl.includes('s3.')) {
+            // Only retry if it's not already an S3 URL (to avoid infinite loop)
+            prepareVideoSource(videoReadyInfo.videoUrl).catch(err => {
+              console.error("[GolpoAI] Continuous monitor retry failed:", err);
+            });
+          }
+        } catch (e) {
+          console.error("[GolpoAI] Error clearing S3 URL in continuous monitor:", e);
+        }
+      }
+    }, 100); // Check every 100ms
+    
+    return () => clearInterval(checkInterval);
+  }, [videoElementRef.current, videoReadyInfo?.videoUrl, prepareVideoSource]);
+
+  // CRITICAL: Monitor video element ref and block S3 URLs from being set
+  // Also intercept src setter to prevent S3 URLs
+  useEffect(() => {
+    if (videoElementRef.current) {
+      const video = videoElementRef.current;
+      
+      // Intercept src setter to block S3 URLs - MORE AGGRESSIVE
+      try {
+        const originalSrcDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src') || 
+                                      Object.getOwnPropertyDescriptor(HTMLVideoElement.prototype, 'src');
+        
+        if (originalSrcDescriptor && originalSrcDescriptor.set) {
+          const originalSetter = originalSrcDescriptor.set;
+          Object.defineProperty(video, 'src', {
+            set: function(value) {
+              // CRITICAL: Block S3 URLs immediately
+              if (value && (value.includes('s3.amazonaws.com') || value.includes('s3.us-east-2.amazonaws.com'))) {
+                console.error("[GolpoAI] BLOCKED: Attempted to set S3 URL to video.src:", value);
+                // Clear src immediately using multiple methods
+                try {
+                  this.setAttribute('src', '');
+                  this.removeAttribute('src');
+                } catch (e) {
+                  // Ignore errors
+                }
+                // Also clear via original setter with empty string
+                try {
+                  originalSetter.call(this, '');
+                } catch (e) {
+                  // Ignore errors
+                }
+                return;
+              }
+              // Only allow blob URLs
+              if (value && !value.startsWith('blob:') && !value.startsWith('data:')) {
+                console.warn("[GolpoAI] Blocked non-blob URL from being set to video.src:", value);
+                try {
+                  this.setAttribute('src', '');
+                  this.removeAttribute('src');
+                } catch (e) {
+                  // Ignore errors
+                }
+                try {
+                  originalSetter.call(this, '');
+                } catch (e) {
+                  // Ignore errors
+                }
+                return;
+              }
+              // Only set if it's a blob or data URL
+              originalSetter.call(this, value);
+            },
+            get: originalSrcDescriptor.get,
+            configurable: true,
+            enumerable: true
+          });
+        }
+      } catch (interceptError) {
+        console.warn("[GolpoAI] Failed to intercept video src setter:", interceptError);
+        // Continue with other checks even if interception fails
+      }
+      
+      // Check current src and clear if S3
+      const currentSrc = video.src || video.getAttribute('src');
+      if (currentSrc && (currentSrc.includes('s3.amazonaws.com') || currentSrc.includes('s3.us-east-2.amazonaws.com'))) {
+        console.error("[GolpoAI] EMERGENCY: Video element has S3 URL! Clearing immediately:", currentSrc);
+        video.src = '';
+        video.setAttribute('src', '');
+        video.load();
+        setVideoPlayerUrl(null);
+        setIsLoadingVideo(false);
+        
+        // Retry with proxy if we have a video URL
+        if (videoReadyInfo?.videoUrl) {
+          prepareVideoSource(videoReadyInfo.videoUrl).catch(err => {
+            console.error("[GolpoAI] Proxy retry from ref monitor failed:", err);
+          });
+        }
+      }
+      
+      // Cleanup: restore original setter when component unmounts
+      return () => {
+        if (originalSrcDescriptor && originalSrcDescriptor.set) {
+          try {
+            Object.defineProperty(video, 'src', originalSrcDescriptor);
+          } catch (e) {
+            // Ignore errors during cleanup
+          }
+        }
+      };
+    }
+  }, [videoElementRef.current, videoReadyInfo?.videoUrl, prepareVideoSource]);
+
   const prepareVideoSource = useCallback(
     async (url) => {
+      // VERSION: 21.3.0 - Size-based approach: Large videos open in new tab, small videos use chunked download in modal
+      console.log("[GolpoAI] prepareVideoSource: v21.3.0 - Processing URL:", url?.substring(0, 100));
+      
       cleanupVideoObjectUrl();
       setVideoOrientation("portrait"); // Reset to default, will be updated when metadata loads
       if (!url) {
         setIsLoadingVideo(false);
+        setVideoPlayerUrl(null); // Clear URL
         return;
       }
 
-      // Always use backend resolver for contentAction module to bypass CSP
-      if (!isBylineItem) {
-        try {
-          // Add timeout to prevent hanging (reduced to 10 seconds)
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error("Request timeout")), 10000)
-          );
-          
-          const backendResponse = await Promise.race([
-            safeInvoke("fetchVideoFile", { videoUrl: url }),
-            timeoutPromise
-          ]);
-          
-          if (backendResponse?.base64Data) {
-            const blob = base64ToBlob(backendResponse.base64Data, backendResponse.contentType || "video/mp4");
-            const objectUrl = URL.createObjectURL(blob);
-            videoObjectUrlRef.current = objectUrl;
-            setVideoPlayerUrl(objectUrl);
-            console.log("[GolpoAI] prepareVideoSource: Successfully created blob URL from backend fetch");
-            setIsLoadingVideo(false);
-            return;
-          } else {
-            console.warn("[GolpoAI] prepareVideoSource: Backend response missing base64Data");
-            setIsLoadingVideo(false);
-          }
-        } catch (invokeError) {
-          console.error("[GolpoAI] prepareVideoSource: Backend fetch failed:", invokeError);
-          
-          // Check for various error types
-          const errorMessage = invokeError?.message || String(invokeError);
-          const isPayloadTooLarge = errorMessage.includes("payload size exceeded") || 
-                                    errorMessage.includes("maximum allowed payload");
-          const isTimeoutOrKilled = errorMessage.includes("timeout") || 
-                                     errorMessage.includes("killed") || 
-                                     errorMessage.includes("Runtime exited");
-          
-          if (isPayloadTooLarge) {
-            console.warn("[GolpoAI] prepareVideoSource: Video file too large for backend fetch (exceeds payload limit)");
-            setCopyUrlMessage("Video file is too large to preview. Use 'Play video' or 'Download video' buttons to access it.");
-            setTimeout(() => setCopyUrlMessage(""), 6000);
-          } else if (isTimeoutOrKilled) {
-            console.warn("[GolpoAI] prepareVideoSource: Backend function timed out or was killed. Video may be too large.");
-            setCopyUrlMessage("Video file is too large to preview. Use 'Play video' or 'Download video' buttons to access it.");
-            setTimeout(() => setCopyUrlMessage(""), 6000);
-          } else {
-            setCopyUrlMessage("Unable to load video preview. Use 'Play video' or 'Download video' buttons to access it.");
-          setTimeout(() => setCopyUrlMessage(""), 5000);
-          }
-          
-          // Don't fall back to direct URL - it will violate CSP
-          setVideoPlayerUrl(null);
+      // Check video size first - if too large, don't try to load in modal
+      const VIDEO_SIZE_THRESHOLD = 10 * 1024 * 1024; // 10MB threshold
+      
+      setIsLoadingVideo(true);
+      setCopyUrlMessage("Checking video size...");
+      
+      try {
+        // Get video size
+        const videoSize = await getVideoSize(url);
+        const isLargeVideo = videoSize && videoSize > VIDEO_SIZE_THRESHOLD;
+        
+        console.log(`[GolpoAI] prepareVideoSource: Video size: ${videoSize ? (videoSize / (1024 * 1024)).toFixed(2) + 'MB' : 'unknown'}, isLarge: ${isLargeVideo}`);
+        
+        if (isLargeVideo) {
+          // Large video: Don't load in modal, just open in new tab
+          console.log("[GolpoAI] prepareVideoSource: Large video detected, opening in new tab instead of modal");
           setIsLoadingVideo(false);
+          setVideoPlayerUrl(null);
+          
+          try {
+            const newWindow = window.open(url, '_blank', 'noopener,noreferrer');
+            if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+              // If window.open failed, copy URL to clipboard
+              copyUrlToClipboardFallback(url, false, "Large video detected. Video URL copied to clipboard. Paste in a new tab to open the video.");
+          } else {
+              setCopyUrlMessage("Large video opened in new tab");
+              setTimeout(() => setCopyUrlMessage(""), 3000);
+            }
+          } catch (openError) {
+            copyUrlToClipboardFallback(url, false, "Large video detected. Video URL copied to clipboard. Paste in a new tab to open the video.");
+          }
           return;
         }
-      }
-
-      // For bylineItem, we can't use backend resolver, so we can't load video
-      // Just store the URL for copy/download purposes
-      console.warn("[GolpoAI] prepareVideoSource: contentBylineItem module - video playback not available");
+        
+        // Small video: Use chunked download to create blob URL for modal playback
+        console.log("[GolpoAI] prepareVideoSource: Small video detected, using chunked download for modal");
+        setCopyUrlMessage("Loading video in chunks...");
+        
+        // Use chunked download which:
+        // 1. Fetches video in small chunks via HTTP Range requests (backend fetchVideoChunk)
+        // 2. Creates blob URLs from chunks (CSP-compliant)
+        // 3. Uses MediaSource API for progressive streaming
+        const blobUrl = await downloadVideoInChunks(url, 'video/mp4', true, videoReadyInfo?.jobId);
+        
+        if (blobUrl && blobUrl.startsWith('blob:')) {
+          console.log("[GolpoAI] prepareVideoSource: ✅ Blob URL created successfully:", blobUrl);
+          setIsLoadingVideo(false);
+          setCopyUrlMessage("");
+          return;
+        } else {
+          throw new Error("Chunked download did not return valid blob URL");
+        }
+        
+      } catch (error) {
+        console.error("[GolpoAI] prepareVideoSource: Error:", error);
       setVideoPlayerUrl(null);
-      setIsLoadingVideo(false);
+        setIsLoadingVideo(false);
+        
+        // On error, try to open in new tab as fallback
+        try {
+          window.open(url, '_blank', 'noopener,noreferrer');
+          setCopyUrlMessage("Error loading video. Opened in new tab. If blocked, URL copied to clipboard.");
+          setTimeout(() => setCopyUrlMessage(""), 5000);
+        } catch (openError) {
+          copyUrlToClipboardFallback(url, false, "Failed to load video. Video URL copied to clipboard.");
+        }
+        return;
+      }
     },
-    [cleanupVideoObjectUrl, safeInvoke, isBylineItem]
+    [cleanupVideoObjectUrl, downloadVideoInChunks, videoReadyInfo?.jobId, getVideoSize, copyUrlToClipboardFallback]
   );
 
+  // Helper function to get video size using HEAD request or first chunk
+  const getVideoSize = useCallback(async (videoUrl) => {
+    try {
+      // Try to get size from backend resolver (uses HEAD request or first chunk)
+      const firstChunkResponse = await invoke('fetchVideoChunk', {
+        videoUrl,
+        startByte: 0,
+        endByte: 1023, // Just get first 1KB to check headers
+      });
+      
+      if (firstChunkResponse?.totalSize) {
+        return firstChunkResponse.totalSize;
+      }
+      
+      // Fallback: try to get from Content-Length header via backend
+      // For now, return null if we can't determine size
+      return null;
+    } catch (error) {
+      console.warn("[GolpoAI] Could not determine video size:", error);
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -829,12 +1450,12 @@ function App() {
     }
   }, []);
 
-  const clearCompletionCheckInterval = useCallback(() => {
-    if (completionCheckIntervalRef.current) {
-      clearInterval(completionCheckIntervalRef.current);
-      completionCheckIntervalRef.current = null;
-    }
-  }, []);
+  // const clearCompletionCheckInterval = useCallback(() => {
+  //   if (completionCheckIntervalRef.current) {
+  //     clearInterval(completionCheckIntervalRef.current);
+  //     completionCheckIntervalRef.current = null;
+  //   }
+  // }, []);
 
   const extractJobIdFromResponse = (payload) => {
     if (!payload) {
@@ -882,6 +1503,155 @@ function App() {
     const keywords = ["failed", "error", "cancelled", "denied", "rejected"];
     return keywords.some((keyword) => normalized.includes(keyword));
   };
+
+  // Restore video generation status when app opens (runs on mount)
+  useEffect(() => {
+    const restoreVideoGenerationStatus = async () => {
+      try {
+        const storedJobId = localStorage.getItem('golpo_video_job_id');
+        
+        // Restore message if there's a job ID, regardless of page
+        if (storedJobId) {
+          console.log("[GolpoAI] App opened - checking for ongoing video generation, job:", storedJobId);
+          
+          // Check if video is already complete by checking status
+          try {
+            const statusResponse = await safeInvoke("getVideoStatus", { jobId: storedJobId });
+            const statusPayload = statusResponse?.body || statusResponse;
+            
+            if (statusPayload) {
+              const status = statusPayload?.status || 
+                            statusPayload?.data?.status || 
+                            statusPayload?.job_status || 
+                            statusPayload?.state || 
+                            "";
+              
+              if (isSuccessStatus(status)) {
+                // Video is complete - clear localStorage and don't restore message
+                console.log("[GolpoAI] Video already completed, clearing stored job");
+                localStorage.removeItem('golpo_video_job_id');
+                localStorage.removeItem('golpo_video_page_id');
+                return;
+              } else if (isFailureStatus(status)) {
+                // Video failed - clear localStorage
+                console.log("[GolpoAI] Video generation failed, clearing stored job");
+                localStorage.removeItem('golpo_video_job_id');
+                localStorage.removeItem('golpo_video_page_id');
+                return;
+              }
+            }
+          } catch (statusError) {
+            console.warn("[GolpoAI] Could not check video status, will restore message anyway:", statusError);
+          }
+          
+          // Video is still processing - restore the "Video Generation Started!" message
+          console.log("[GolpoAI] Restoring video generation status for job:", storedJobId);
+          setVideoGenerationResult({
+            job_id: storedJobId,
+            status: "processing"
+          });
+          setVideoJobId(storedJobId);
+          setIsGeneratingVideo(true);
+          setVideoStatusMessage("Status: Processing - Video generation in progress...");
+          
+          // Start polling for status updates
+          if (completionCheckIntervalRef.current) {
+            clearInterval(completionCheckIntervalRef.current);
+          }
+          
+          const checkForCompletion = async () => {
+            try {
+              const statusResponse = await safeInvoke("getVideoStatus", { jobId: storedJobId });
+              const statusPayload = statusResponse?.body || statusResponse;
+              
+              if (!statusPayload) {
+                console.log("[GolpoAI] No status response received");
+                return;
+              }
+              
+              // Extract status from response
+              const status = statusPayload?.status || 
+                            statusPayload?.data?.status || 
+                            statusPayload?.job_status || 
+                            statusPayload?.state || 
+                            "";
+              
+              console.log("[GolpoAI] Video status check:", status);
+              
+              // Check if video is ready
+              if (isSuccessStatus(status)) {
+                // Extract video URL from status response
+                const videoUrl = extractVideoUrlFromPayload(statusPayload);
+                
+                if (videoUrl) {
+                  console.log("[GolpoAI] ✅ Video completed! URL:", videoUrl);
+                  
+                  // Clear the interval first
+                  if (completionCheckIntervalRef.current) {
+                    clearInterval(completionCheckIntervalRef.current);
+                    completionCheckIntervalRef.current = null;
+                  }
+                  
+                  // Clear generation result and show completion
+                  setVideoGenerationResult(null);
+                  setVideoStatusMessage("Status: Complete");
+                  
+                  // Wait a moment, then show completion popup and refresh
+                  setTimeout(() => {
+                    setCompletedVideoUrl(videoUrl);
+                    setShowVideoCompletionModal(true);
+                    setIsGeneratingVideo(false);
+                    setVideoStatusMessage("");
+                    localStorage.removeItem('golpo_video_job_id');
+                    localStorage.removeItem('golpo_video_page_id');
+                    localStorage.setItem('golpo_last_seen_video_url', videoUrl);
+                    // Refresh page to get new video URL in comments
+                    window.location.reload();
+                  }, 2000);
+                } else {
+                  console.log("[GolpoAI] Video status is complete but no URL found");
+                }
+              } else if (isFailureStatus(status)) {
+                console.log("[GolpoAI] Video generation failed with status:", status);
+                
+                // Clear the interval on failure
+                if (completionCheckIntervalRef.current) {
+                  clearInterval(completionCheckIntervalRef.current);
+                  completionCheckIntervalRef.current = null;
+                }
+                
+                setVideoGenerationResult(null);
+                setIsGeneratingVideo(false);
+                setVideoStatusMessage("Status: Failed");
+                localStorage.removeItem('golpo_video_job_id');
+                localStorage.removeItem('golpo_video_page_id');
+              } else {
+                // Still processing - update status message
+                console.log("[GolpoAI] Video still processing, status:", status);
+                setVideoGenerationResult({
+                  job_id: storedJobId,
+                  status: status || "processing"
+                });
+                setVideoStatusMessage("Status: Processing - Video generation in progress...");
+              }
+            } catch (error) {
+              console.warn("[GolpoAI] Error checking video status:", error);
+            }
+          };
+          
+          // Check immediately and then every 15 seconds
+          console.log("[GolpoAI] Starting status check interval for restored job:", storedJobId);
+          checkForCompletion();
+          completionCheckIntervalRef.current = setInterval(checkForCompletion, 15000);
+        }
+      } catch (error) {
+        console.warn("[GolpoAI] Error restoring video generation status:", error);
+      }
+    };
+    
+    // Run restoration check when app opens
+    restoreVideoGenerationStatus();
+  }, []); // Empty dependency array - runs once on mount
 
   // Extract all video URLs from comments only
   const extractAllVideoUrls = useCallback((pageData, comments) => {
@@ -946,7 +1716,14 @@ function App() {
       };
 
       setVideoReadyInfo(normalizedInfo);
+      // CRITICAL: Always use prepareVideoSource for S3 URLs to convert to blob
+      // Never let video element see S3 URL directly
+      if (videoUrl && (videoUrl.includes('s3.amazonaws.com') || videoUrl.includes('s3.us-east-2.amazonaws.com'))) {
+        console.log("[GolpoAI] S3 URL detected, converting to blob via prepareVideoSource");
+        await prepareVideoSource(videoUrl);
+      } else {
       prepareVideoSource(videoUrl);
+      }
       
       // Show completion popup when video is ready
       if (videoUrl) {
@@ -1186,51 +1963,65 @@ function App() {
     }
   }, []);
 
-  const openInNewTab = (url) => {
+  const openInNewTab = useCallback((url, download = false) => {
     if (!url) {
-      return;
+      return false;
     }
 
-    // Try window.open first (requires allow-popups sandbox permission)
-    try {
-      const opened = window.open(url, "_blank", "noopener,noreferrer");
-      if (opened) {
-        return; // Successfully opened
-      }
-    } catch (error) {
-      console.log("[GolpoAI] window.open blocked, trying link element fallback:", error);
-    }
-
-    // Fallback: Create a link element and click it
-    // This works even without popup permissions for downloads/new tabs
+    // In sandboxed iframes, opening new tabs/windows is often blocked
+    // Try link element approach first, but immediately fall back to clipboard if it fails
+    let linkClicked = false;
+    
     try {
       const link = document.createElement("a");
       link.href = url;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
-      link.style.display = "none";
-      document.body.appendChild(link);
-      link.click();
-      setTimeout(() => {
-        document.body.removeChild(link);
-      }, 100);
-    } catch (fallbackError) {
-      console.error("[GolpoAI] Unable to open URL in new tab:", fallbackError);
-      // Last resort: Copy URL to clipboard and show message
-      if (navigator.clipboard) {
-        navigator.clipboard.writeText(url).then(() => {
-          setCopyUrlMessage("URL copied to clipboard. Please paste in a new tab.");
-          setTimeout(() => setCopyUrlMessage(""), 5000);
-        }).catch(() => {
-          setCopyUrlMessage(`Please copy this URL manually: ${url}`);
-          setTimeout(() => setCopyUrlMessage(""), 10000);
-        });
-      } else {
-        setCopyUrlMessage(`Please copy this URL manually: ${url}`);
-        setTimeout(() => setCopyUrlMessage(""), 10000);
+      if (download) {
+        // Extract filename from URL or use default
+        const urlParts = url.split('/');
+        const filename = urlParts[urlParts.length - 1] || `golpo-video-${Date.now()}.mp4`;
+        link.download = filename;
       }
+      link.style.display = "none";
+      link.style.position = "absolute";
+      link.style.left = "-9999px";
+      document.body.appendChild(link);
+      
+      // Use requestAnimationFrame to ensure the link is in the DOM
+      requestAnimationFrame(() => {
+        try {
+      link.click();
+          linkClicked = true;
+      setTimeout(() => {
+            if (document.body.contains(link)) {
+        document.body.removeChild(link);
+            }
+          }, 200);
+        } catch (clickError) {
+          console.warn("[GolpoAI] Link click may be blocked by sandbox, using clipboard:", clickError);
+          if (document.body.contains(link)) {
+            document.body.removeChild(link);
+          }
+          // Fall back to clipboard immediately
+          copyUrlToClipboardFallback(url, download);
+        }
+      });
+      
+      // Also set up clipboard fallback in case link click is silently blocked
+      setTimeout(() => {
+        if (!linkClicked) {
+          copyUrlToClipboardFallback(url, download);
+        }
+      }, 500);
+      
+      return linkClicked;
+    } catch (fallbackError) {
+      console.warn("[GolpoAI] Unable to create link element, using clipboard:", fallbackError);
+      copyUrlToClipboardFallback(url, download);
+      return false;
     }
-  };
+  }, [copyUrlToClipboardFallback]);
 
   const triggerSimpleDownload = useCallback((url) => {
     if (!url) {
@@ -1247,8 +2038,8 @@ function App() {
         document.body.removeChild(link);
       }, 100);
     } catch (err) {
-      console.warn("[GolpoAI] Simple download failed, opening in new tab instead:", err);
-      openInNewTab(url);
+      console.warn("[GolpoAI] Simple download failed, copying URL to clipboard:", err);
+      copyUrlToClipboardFallback(url, true);
     }
   }, []);
 
@@ -1278,31 +2069,273 @@ function App() {
         return;
       }
 
-      // Open video in modal instead of playing in existing modal or new tab
-      setIsLoadingVideo(true);
-      setError("");
+      // Check video size to decide: modal (small) or new tab (large)
+      const VIDEO_SIZE_THRESHOLD = 10 * 1024 * 1024; // 10MB threshold
       
       try {
-        // Set up video ready info to show in the preview modal
-        const normalizedInfo = {
-          jobId: videoReadyInfo?.jobId || null,
-          videoUrl: targetUrl,
-          downloadUrl: targetUrl,
-          status: "completed",
-          raw: { video_url: targetUrl }
-        };
-        setVideoReadyInfo(normalizedInfo);
-        await prepareVideoSource(targetUrl);
-        setShowVideoReadyModal(true);
+        setIsLoadingVideo(true);
+        setError("");
+        
+        // Get video size
+        const videoSize = await getVideoSize(targetUrl);
+        const isLargeVideo = videoSize && videoSize > VIDEO_SIZE_THRESHOLD;
+        
+        console.log(`[GolpoAI] Video size: ${videoSize ? (videoSize / (1024 * 1024)).toFixed(2) + 'MB' : 'unknown'}, isLarge: ${isLargeVideo}`);
+        
+        if (isLargeVideo) {
+          // Large video: open directly in new tab (S3 URL)
+          console.log("[GolpoAI] Large video detected, opening directly in new tab");
+          try {
+            const newWindow = window.open(targetUrl, '_blank', 'noopener,noreferrer');
+            if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+              copyUrlToClipboardFallback(targetUrl, false, "Large video detected. Video URL copied to clipboard. Paste in a new tab to open the video.");
+            } else {
+              setCopyUrlMessage("Large video opened in new tab");
+              setTimeout(() => setCopyUrlMessage(""), 3000);
+            }
+          } catch (openError) {
+            copyUrlToClipboardFallback(targetUrl, false, "Large video detected. Video URL copied to clipboard. Paste in a new tab to open the video.");
+        }
+      } else {
+          // Small video: open in modal
+          console.log("[GolpoAI] Small video detected, opening in modal");
+          // Set up video ready info to show in the preview modal
+          const normalizedInfo = {
+            jobId: videoReadyInfo?.jobId || null,
+            videoUrl: targetUrl,
+            downloadUrl: targetUrl,
+            status: "completed",
+            raw: { video_url: targetUrl }
+          };
+          setVideoReadyInfo(normalizedInfo);
+          await prepareVideoSource(targetUrl);
+          setShowVideoReadyModal(true);
+        }
       } catch (err) {
         console.error("[GolpoAI] Failed to prepare video:", err);
-        setError(err?.message || "Unable to load video. Please try again.");
+        // On error, try to open in new tab as fallback
+        try {
+          const newWindow = window.open(targetUrl, '_blank', 'noopener,noreferrer');
+          if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+            copyUrlToClipboardFallback(targetUrl, false, "Video URL copied to clipboard. Paste in a new tab to open the video.");
+          }
+        } catch (openError) {
+          copyUrlToClipboardFallback(targetUrl, false, "Video URL copied to clipboard. Paste in a new tab to open the video.");
+        }
       } finally {
         setIsLoadingVideo(false);
       }
     },
-    [videoReadyInfo, videoPlayerUrl, requireContentActionForMedia, prepareVideoSource]
+    [videoReadyInfo, videoPlayerUrl, requireContentActionForMedia, prepareVideoSource, getVideoSize, playVideoInFullscreen]
   );
+
+  // Function to play video in fullscreen
+  const playVideoInFullscreen = useCallback(async (videoUrl) => {
+    try {
+      console.log("[GolpoAI] Preparing video for fullscreen playback:", videoUrl);
+      setIsLoadingVideo(true);
+      
+      // Set up video ready info
+      const normalizedInfo = {
+        jobId: videoReadyInfo?.jobId || null,
+        videoUrl: videoUrl,
+        downloadUrl: videoUrl,
+        status: "completed",
+        raw: { video_url: videoUrl }
+      };
+      setVideoReadyInfo(normalizedInfo);
+      
+      // Prepare video source (will use chunked download for S3 URLs)
+      await prepareVideoSource(videoUrl);
+      
+      // Wait for the blob URL to be ready (with timeout)
+      // We'll poll the videoObjectUrlRef which is set by downloadVideoInChunks
+      let attempts = 0;
+      const maxAttempts = 50; // Wait up to 5 seconds
+      let currentBlobUrl = null;
+      
+      while (attempts < maxAttempts) {
+        // Check both videoObjectUrlRef and videoPlayerUrl state
+        if (videoObjectUrlRef.current && videoObjectUrlRef.current.startsWith('blob:')) {
+          currentBlobUrl = videoObjectUrlRef.current;
+          break;
+        }
+        // Also check state (in case it's set via setVideoPlayerUrlSafe)
+        if (videoPlayerUrl && videoPlayerUrl.startsWith('blob:')) {
+          currentBlobUrl = videoPlayerUrl;
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+        attempts++;
+      }
+      
+      if (!currentBlobUrl || !currentBlobUrl.startsWith('blob:')) {
+        throw new Error("Video URL not ready for fullscreen playback after waiting");
+      }
+      
+      // Create a fullscreen video container
+      const fullscreenContainer = document.createElement('div');
+      fullscreenContainer.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: #000;
+        z-index: 999999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      `;
+      
+      const video = document.createElement('video');
+      video.src = currentBlobUrl;
+      video.controls = true;
+      video.style.cssText = `
+        max-width: 100%;
+        max-height: 100%;
+        width: auto;
+        height: auto;
+      `;
+      
+      // Close button
+      const closeButton = document.createElement('button');
+      closeButton.innerHTML = '✖';
+      closeButton.style.cssText = `
+        position: absolute;
+        top: 20px;
+        right: 20px;
+        background: rgba(0, 0, 0, 0.7);
+        color: white;
+        border: none;
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        font-size: 20px;
+        cursor: pointer;
+        z-index: 1000000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      `;
+      
+      const closeFullscreen = () => {
+        if (fullscreenContainer.parentNode) {
+          fullscreenContainer.parentNode.removeChild(fullscreenContainer);
+        }
+        setIsFullscreenVideo(false);
+        setIsLoadingVideo(false);
+        // Exit fullscreen if browser is in fullscreen mode
+        if (document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement) {
+          if (document.exitFullscreen) {
+            document.exitFullscreen();
+          } else if (document.webkitExitFullscreen) {
+            document.webkitExitFullscreen();
+          } else if (document.mozCancelFullScreen) {
+            document.mozCancelFullScreen();
+          }
+        }
+      };
+      
+      closeButton.onclick = closeFullscreen;
+      
+      // Handle escape key
+      const handleEscape = (e) => {
+        if (e.key === 'Escape') {
+          closeFullscreen();
+          document.removeEventListener('keydown', handleEscape);
+        }
+      };
+      document.addEventListener('keydown', handleEscape);
+      
+      fullscreenContainer.appendChild(video);
+      fullscreenContainer.appendChild(closeButton);
+      document.body.appendChild(fullscreenContainer);
+      
+      setIsFullscreenVideo(true);
+      setIsLoadingVideo(false);
+      
+      // Try to enter fullscreen mode
+      try {
+        if (fullscreenContainer.requestFullscreen) {
+          await fullscreenContainer.requestFullscreen();
+        } else if (fullscreenContainer.webkitRequestFullscreen) {
+          await fullscreenContainer.webkitRequestFullscreen();
+        } else if (fullscreenContainer.mozRequestFullScreen) {
+          await fullscreenContainer.mozRequestFullScreen();
+        } else if (fullscreenContainer.msRequestFullscreen) {
+          await fullscreenContainer.msRequestFullscreen();
+        }
+      } catch (fsError) {
+        console.warn("[GolpoAI] Could not enter fullscreen mode, but video container is shown:", fsError);
+      }
+      
+      // Play video
+      video.play().catch(err => {
+        console.warn("[GolpoAI] Autoplay failed, user can click play:", err);
+      });
+      
+      // Cleanup on video end
+      video.onended = () => {
+        closeFullscreen();
+      };
+      
+      console.log("[GolpoAI] Video playing in fullscreen");
+    } catch (error) {
+      console.error("[GolpoAI] Failed to play video in fullscreen:", error);
+      setIsLoadingVideo(false);
+      setIsFullscreenVideo(false);
+      setCopyUrlMessage("Failed to play video in fullscreen. Opening in new tab...");
+      setTimeout(() => setCopyUrlMessage(""), 5000);
+      // Fallback to new tab
+      try {
+        window.open(videoUrl, '_blank', 'noopener,noreferrer');
+      } catch (openError) {
+        copyUrlToClipboardFallback(videoUrl, false, "Video URL copied to clipboard.");
+      }
+    }
+  }, [prepareVideoSource, videoReadyInfo, copyUrlToClipboardFallback]);
+
+  // Helper function to trigger download - defined outside to avoid scope issues
+  const triggerDownload = useCallback((blobOrUrl, jobId = null) => {
+      try {
+      const link = document.createElement("a");
+      link.href = blobOrUrl;
+        link.download = `golpo-video-${jobId || Date.now()}.mp4`;
+        // Don't use target="_blank" for downloads - it causes sandbox popup errors
+        // The download attribute handles the download without opening a new window
+        link.style.display = "none";
+        link.style.position = "absolute";
+        link.style.left = "-9999px";
+      document.body.appendChild(link);
+        
+        // Use requestAnimationFrame to ensure link is in DOM before clicking
+        requestAnimationFrame(() => {
+          try {
+      link.click();
+      setTimeout(() => {
+              if (document.body.contains(link)) {
+        document.body.removeChild(link);
+              }
+        if (blobOrUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(blobOrUrl);
+        }
+            }, 200);
+          } catch (clickError) {
+            console.warn("[GolpoAI] Link click failed, using clipboard fallback:", clickError);
+            if (document.body.contains(link)) {
+              document.body.removeChild(link);
+            }
+            // Fallback to clipboard if download fails
+            copyUrlToClipboardFallback(blobOrUrl, true);
+          }
+        });
+      } catch (error) {
+        console.warn("[GolpoAI] Download trigger failed, using clipboard fallback:", error);
+        // Fallback to clipboard if download fails
+        copyUrlToClipboardFallback(blobOrUrl, true);
+      }
+  }, [copyUrlToClipboardFallback]);
 
   const handleDownloadVideo = useCallback(async () => {
     if (!requireContentActionForMedia("download the video")) {
@@ -1317,50 +2350,39 @@ function App() {
       return;
     }
 
-    const triggerDownload = (blobOrUrl) => {
-      const link = document.createElement("a");
-      link.href = blobOrUrl;
-      link.download = `golpo-video-${videoReadyInfo?.jobId || Date.now()}.mp4`;
-      link.target = "_blank"; // Open in new tab as fallback
-      document.body.appendChild(link);
-      link.click();
-      setTimeout(() => {
-        document.body.removeChild(link);
-        if (blobOrUrl.startsWith("blob:")) {
-          URL.revokeObjectURL(blobOrUrl);
-        }
-      }, 100);
-    };
-
     // If we already have a blob URL, use it directly
     if (videoPlayerUrl && videoPlayerUrl.startsWith("blob:")) {
-      triggerDownload(videoPlayerUrl);
+      triggerDownload(videoPlayerUrl, videoReadyInfo?.jobId);
       setCopyUrlMessage("Downloading video...");
       setTimeout(() => setCopyUrlMessage(""), 2000);
       return;
     }
 
-    // Try to download directly from URL first (works for same-origin or CORS-enabled URLs)
-    try {
-      // Try fetch with credentials to see if we can download directly
-      const response = await fetch(remoteUrl, {
-        method: 'GET',
-        mode: 'cors',
-      });
-      
-      if (response.ok) {
-        const blob = await response.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        triggerDownload(blobUrl);
-        setCopyUrlMessage("Downloading video...");
-        setTimeout(() => setCopyUrlMessage(""), 2000);
+    // Check if video is large (iframe mode or blob URL indicates small video from backend)
+    // For large videos, use chunked download approach
+    const isLargeVideo = useIframeForVideo || (!videoPlayerUrl?.startsWith('blob:') && !videoPlayerUrl?.startsWith('data:'));
+    
+    if (isLargeVideo) {
+      console.log("[GolpoAI] Large video detected, using chunked download");
+      // Use chunked download for large videos
+      try {
+        await downloadVideoInChunks(remoteUrl, 'video/mp4', false, videoReadyInfo?.jobId);
+        return;
+      } catch (chunkError) {
+        console.warn("[GolpoAI] Chunked download failed, falling back to browser native download:", chunkError);
+        // Fallback to browser native download
+        setCopyUrlMessage("Starting download...");
+        triggerDownload(remoteUrl, videoReadyInfo?.jobId);
+        setTimeout(() => {
+          setCopyUrlMessage("");
+        }, 2000);
         return;
       }
-    } catch (fetchError) {
-      console.log("[GolpoAI] Direct fetch failed, trying backend:", fetchError);
     }
 
-    // Try backend fetch with shorter timeout (8 seconds)
+    // Note: We already checked for blob URL above, so this is a duplicate check - removed
+
+    // Try backend fetch for small videos only (with timeout)
     try {
       const timeoutPromise = new Promise((_, reject) => 
         setTimeout(() => reject(new Error("Request timeout")), 8000)
@@ -1374,7 +2396,7 @@ function App() {
       if (backendResponse?.base64Data) {
         const blob = base64ToBlob(backendResponse.base64Data, backendResponse.contentType || "video/mp4");
         const blobUrl = URL.createObjectURL(blob);
-        triggerDownload(blobUrl);
+        triggerDownload(blobUrl, videoReadyInfo?.jobId);
         setCopyUrlMessage("Downloading video...");
         setTimeout(() => setCopyUrlMessage(""), 2000);
         console.log("[GolpoAI] Download successful via backend fetch");
@@ -1383,40 +2405,40 @@ function App() {
         console.warn("[GolpoAI] Backend response missing base64Data");
       }
     } catch (invokeError) {
-      console.error("[GolpoAI] Backend download fetch failed:", invokeError);
+      console.warn("[GolpoAI] Backend download failed, using browser native download:", invokeError);
       
-      // Check if it's a timeout, killed, or payload size error
+      // Check if it's a payload size error - if so, definitely use native download
       const errorMessage = invokeError?.message || String(invokeError);
       const isPayloadTooLarge = errorMessage.includes("payload size exceeded") || 
                                  errorMessage.includes("maximum allowed payload");
-      const isTimeoutOrKilled = errorMessage.includes("timeout") || 
-                                 errorMessage.includes("killed") || 
-                                 errorMessage.includes("Runtime exited");
       
-      if (isPayloadTooLarge || isTimeoutOrKilled) {
-        setCopyUrlMessage("Video file is too large. Opening in new tab for download...");
-        // Fallback: open in new tab for download
-      setTimeout(() => {
-        setCopyUrlMessage("");
-        openInNewTab(remoteUrl);
-      }, 2000);
+      if (isPayloadTooLarge) {
+        console.log("[GolpoAI] Video too large for backend, using chunked download");
+        // For large videos, use chunked download
+        try {
+          await downloadVideoInChunks(remoteUrl, 'video/mp4', false, videoReadyInfo?.jobId);
       return;
+        } catch (chunkError) {
+          console.warn("[GolpoAI] Chunked download failed, using browser native download:", chunkError);
+          // Fallback to browser native download
+        }
       }
     }
 
-    // Final fallback: try direct download link (browser will handle it)
-    console.log("[GolpoAI] Using direct download link as fallback");
+    // Final fallback: use browser's native download (handles chunking automatically)
+    console.log("[GolpoAI] Using browser native download (handles chunking via HTTP range requests)");
     setCopyUrlMessage("Starting download...");
-    triggerDownload(remoteUrl);
+    triggerDownload(remoteUrl, videoReadyInfo?.jobId);
     setTimeout(() => {
       setCopyUrlMessage("");
     }, 2000);
-  }, [videoPlayerUrl, videoReadyInfo, safeInvoke, requireContentActionForMedia]);
+  }, [videoPlayerUrl, videoReadyInfo, safeInvoke, requireContentActionForMedia, useIframeForVideo, copyUrlToClipboardFallback, downloadVideoInChunks, triggerDownload]);
 
   const closeVideoReadyModal = () => {
     cleanupVideoObjectUrl();
     setShowVideoReadyModal(false);
     setVideoReadyInfo(null);
+    setUseIframeForVideo(false); // Reset iframe mode when closing modal
   };
 
   // Detect module type on mount
@@ -1610,18 +2632,121 @@ function App() {
                 const storedJobId = localStorage.getItem('golpo_video_job_id');
                 const storedPageId = localStorage.getItem('golpo_video_page_id');
                 
-                // If there was a job in progress and we're on the same page, show completion popup
-                if (storedJobId && storedPageId === fullPageInfo.id && latestUrl) {
-                  // Check if this is a new video (not seen before)
-                  const lastSeenUrl = localStorage.getItem('golpo_last_seen_video_url');
-                  if (latestUrl !== lastSeenUrl) {
-                    console.log("[GolpoAI] Video generation completed while user was away! Showing popup");
-                    setCompletedVideoUrl(latestUrl);
-                    setShowVideoCompletionModal(true);
-                    // Clear stored job ID since video is complete
-                    localStorage.removeItem('golpo_video_job_id');
-                    localStorage.removeItem('golpo_video_page_id');
-                    localStorage.setItem('golpo_last_seen_video_url', latestUrl);
+                // If there was a job in progress and we're on the same page
+                if (storedJobId && storedPageId === fullPageInfo.id) {
+                  // Check if video is already complete (new video URL exists)
+                  if (latestUrl) {
+                    const lastSeenUrl = localStorage.getItem('golpo_last_seen_video_url');
+                    if (latestUrl !== lastSeenUrl) {
+                      // Video completed while user was away
+                      console.log("[GolpoAI] Video generation completed while user was away! Showing popup");
+                      setCompletedVideoUrl(latestUrl);
+                      setShowVideoCompletionModal(true);
+                      // Clear stored job ID since video is complete
+                      localStorage.removeItem('golpo_video_job_id');
+                      localStorage.removeItem('golpo_video_page_id');
+                      localStorage.setItem('golpo_last_seen_video_url', latestUrl);
+                    }
+                  } else {
+                    // Video is still generating - restore the "Video Generation Started!" message
+                    console.log("[GolpoAI] Restoring video generation status for job:", storedJobId);
+                    setVideoGenerationResult({
+                      job_id: storedJobId,
+                      status: "processing"
+                    });
+                    setVideoJobId(storedJobId);
+                    setIsGeneratingVideo(true);
+                    setVideoStatusMessage("Status: Processing - Video generation in progress...");
+                    
+                    // Start polling for status updates using the same pattern as handleGenerateVideo
+                    if (completionCheckIntervalRef.current) {
+                      clearInterval(completionCheckIntervalRef.current);
+                    }
+                    
+                    const checkForCompletion = async () => {
+                      try {
+                        const statusResponse = await safeInvoke("getVideoStatus", { jobId: storedJobId });
+                        const statusPayload = statusResponse?.body || statusResponse;
+                        
+                        if (!statusPayload) {
+                          console.log("[GolpoAI] No status response received");
+                          return;
+                        }
+                        
+                        // Extract status from response
+                        const status = statusPayload?.status || 
+                                      statusPayload?.data?.status || 
+                                      statusPayload?.job_status || 
+                                      statusPayload?.state || 
+                                      "";
+                        
+                        console.log("[GolpoAI] Video status check:", status);
+                        
+                        // Check if video is ready
+                        if (isSuccessStatus(status)) {
+                          // Extract video URL from status response
+                          const videoUrl = extractVideoUrlFromPayload(statusPayload);
+                          
+                          if (videoUrl) {
+                            console.log("[GolpoAI] ✅ Video completed! URL:", videoUrl);
+                            
+                            // Clear the interval first
+                            if (completionCheckIntervalRef.current) {
+                              clearInterval(completionCheckIntervalRef.current);
+                              completionCheckIntervalRef.current = null;
+                            }
+                            
+                            // Clear generation result and show completion
+                            setVideoGenerationResult(null);
+                            setVideoStatusMessage("Status: Complete");
+                            
+                            // Wait a moment, then show completion popup and refresh
+                            setTimeout(() => {
+                              setCompletedVideoUrl(videoUrl);
+                              setShowVideoCompletionModal(true);
+                              setIsGeneratingVideo(false);
+                              setVideoStatusMessage("");
+                              localStorage.removeItem('golpo_video_job_id');
+                              localStorage.removeItem('golpo_video_page_id');
+                              localStorage.setItem('golpo_last_seen_video_url', videoUrl);
+                              // Refresh page to get new video URL in comments
+                              window.location.reload();
+                            }, 2000);
+                          } else {
+                            console.log("[GolpoAI] Video status is complete but no URL found");
+                          }
+                        } else if (isFailureStatus(status)) {
+                          console.log("[GolpoAI] Video generation failed with status:", status);
+                          
+                          // Clear the interval on failure
+                          if (completionCheckIntervalRef.current) {
+                            clearInterval(completionCheckIntervalRef.current);
+                            completionCheckIntervalRef.current = null;
+                          }
+                          
+                          setVideoGenerationResult(null);
+                          setIsGeneratingVideo(false);
+                          setVideoStatusMessage("Status: Failed");
+                          localStorage.removeItem('golpo_video_job_id');
+                          localStorage.removeItem('golpo_video_page_id');
+                        } else {
+                          // Still processing - update status message
+                          console.log("[GolpoAI] Video still processing, status:", status);
+                          setVideoGenerationResult({
+                            job_id: storedJobId,
+                            status: status || "processing"
+                          });
+                          setVideoStatusMessage("Status: Processing - Video generation in progress...");
+                        }
+                      } catch (error) {
+                        console.warn("[GolpoAI] Error checking video status:", error);
+                      }
+                    };
+                    
+                    // Check immediately and then every 15 seconds
+                    console.log("[GolpoAI] Starting status check interval for restored job:", storedJobId);
+                    checkForCompletion();
+                    completionCheckIntervalRef.current = setInterval(checkForCompletion, 15000);
                   }
                 }
               }
@@ -2036,7 +3161,7 @@ function App() {
         durationLabel: selectedDurationOption.label,
         voice,
         language,
-        includeLogo,
+        useColor,
       });
 
       // Prepare video specifications with all parameters
@@ -2045,7 +3170,8 @@ function App() {
         durationLabel: selectedDurationOption.label,
         voice: voice,
         language: language,
-        includeLogo: includeLogo,
+        
+        useColor: useColor,
         music: music,
         style: style,
         selectedQuickAction: description || (selectedAction !== null ? quickActions[selectedAction] : null),
@@ -2462,20 +3588,44 @@ function App() {
                 setError("");
                 
                 try {
-                  // Set up video ready info to show in the preview modal
-                  const normalizedInfo = {
-                    jobId: null,
-                    videoUrl: latestVideoUrl,
-                    downloadUrl: latestVideoUrl,
-                    status: "completed",
-                    raw: { video_url: latestVideoUrl }
-                  };
-                  setVideoReadyInfo(normalizedInfo);
-                  await prepareVideoSource(latestVideoUrl);
-                  setShowVideoReadyModal(true);
+                  // Check video size to decide: modal (small) or new tab (large)
+                  const VIDEO_SIZE_THRESHOLD = 10 * 1024 * 1024; // 10MB threshold
+                  const videoSize = await getVideoSize(latestVideoUrl);
+                  const isLargeVideo = videoSize && videoSize > VIDEO_SIZE_THRESHOLD;
+                  
+                  console.log(`[GolpoAI] Link clicked - Video size: ${videoSize ? (videoSize / (1024 * 1024)).toFixed(2) + 'MB' : 'unknown'}, isLarge: ${isLargeVideo}`);
+                  
+                  if (isLargeVideo) {
+                    // Large video: play in fullscreen
+                    console.log("[GolpoAI] Large video detected, playing in fullscreen");
+                    await playVideoInFullscreen(latestVideoUrl);
+                  } else {
+                    // Small video: open in modal
+                    console.log("[GolpoAI] Small video detected, opening in modal");
+                    // Set up video ready info to show in the preview modal
+                    const normalizedInfo = {
+                      jobId: null,
+                      videoUrl: latestVideoUrl,
+                      downloadUrl: latestVideoUrl,
+                      status: "completed",
+                      raw: { video_url: latestVideoUrl }
+                    };
+                    setVideoReadyInfo(normalizedInfo);
+                    await prepareVideoSource(latestVideoUrl);
+                    setShowVideoReadyModal(true);
+                  }
                 } catch (err) {
-                  console.error("[GolpoAI] Failed to prepare video:", err);
-                  setError(err?.message || "Unable to load video. Please try again.");
+                  console.error("[GolpoAI] Failed to handle video link click:", err);
+                  // On error, try to open in new tab as fallback
+                  setIsLoadingVideo(false);
+                  try {
+                    const newWindow = window.open(latestVideoUrl, '_blank', 'noopener,noreferrer');
+                    if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+                      copyUrlToClipboardFallback(latestVideoUrl, false, "Video URL copied to clipboard. Paste in a new tab to open the video.");
+                    }
+                  } catch (openError) {
+                    copyUrlToClipboardFallback(latestVideoUrl, false, "Video URL copied to clipboard. Paste in a new tab to open the video.");
+                  }
                 } finally {
                   setIsLoadingVideo(false);
                 }
@@ -2752,12 +3902,14 @@ function App() {
                 <div style={styles.formCheckboxRow}>
                   <input
                     type="checkbox"
-                    id="includeLogo"
-                    checked={includeLogo}
-                    onChange={(e) => setIncludeLogo(e.target.checked)}
+                    id="useColor"
+                    checked={useColor}
+                    onChange={(e) => setUseColor(e.target.checked)}
                     style={styles.formCheckbox}
                   />
-                  
+                  <label htmlFor="useColor" style={styles.formCheckboxLabel}>
+                    Generate video with color
+                  </label>
                 </div>
               </div>
 
@@ -2929,23 +4081,61 @@ function App() {
                     setError("");
                     
                     try {
-                      // Set up video ready info and show video preview modal
-                      const normalizedInfo = {
-                        jobId: videoJobId,
-                        videoUrl: videoUrlToPlay,
-                        downloadUrl: videoUrlToPlay,
-                        status: "completed",
-                        raw: { video_url: videoUrlToPlay }
-                      };
-                      setVideoReadyInfo(normalizedInfo);
-                      await prepareVideoSource(videoUrlToPlay);
-                      setShowVideoReadyModal(true);
-                      setCompletedVideoUrl(null);
-                      clearCompletionCheckInterval();
+                      // Check video size to decide: modal (small) or new tab (large)
+                      const VIDEO_SIZE_THRESHOLD = 10 * 1024 * 1024; // 10MB threshold
+                      const videoSize = await getVideoSize(videoUrlToPlay);
+                      const isLargeVideo = videoSize && videoSize > VIDEO_SIZE_THRESHOLD;
+                      
+                      console.log(`[GolpoAI] Video size: ${videoSize ? (videoSize / (1024 * 1024)).toFixed(2) + 'MB' : 'unknown'}, isLarge: ${isLargeVideo}`);
+                      
+                      if (isLargeVideo) {
+                        // Large video: open directly in new tab
+                        console.log("[GolpoAI] Large video detected, opening directly in new tab");
+                        setIsLoadingVideo(false);
+                        try {
+                          // Try to open in new tab
+                          const newWindow = window.open(videoUrlToPlay, '_blank', 'noopener,noreferrer');
+                          if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+                            // If window.open failed (blocked by popup blocker or CSP), fall back to clipboard
+                            console.warn("[GolpoAI] window.open failed, falling back to clipboard");
+                            copyUrlToClipboardFallback(videoUrlToPlay, false, "Large video detected. Video URL copied to clipboard. Paste in a new tab to open the video.");
+                          }
+                        } catch (openError) {
+                          // If window.open throws an error, fall back to clipboard
+                          console.warn("[GolpoAI] window.open error, falling back to clipboard:", openError);
+                          copyUrlToClipboardFallback(videoUrlToPlay, false, "Large video detected. Video URL copied to clipboard. Paste in a new tab to open the video.");
+                        }
+                        clearCompletionCheckInterval();
+                      } else {
+                        // Small video: open in modal
+                        console.log("[GolpoAI] Small video detected, opening in modal");
+                        // Set up video ready info and show video preview modal
+                        const normalizedInfo = {
+                          jobId: videoJobId,
+                          videoUrl: videoUrlToPlay,
+                          downloadUrl: videoUrlToPlay,
+                          status: "completed",
+                          raw: { video_url: videoUrlToPlay }
+                        };
+                        setVideoReadyInfo(normalizedInfo);
+                        await prepareVideoSource(videoUrlToPlay);
+                        setShowVideoReadyModal(true);
+                        setCompletedVideoUrl(null);
+                        clearCompletionCheckInterval();
+                      }
                     } catch (err) {
                       console.error("[GolpoAI] Open video failed:", err);
-                      setError(err?.message || "Unable to load video. Please try again.");
+                      // On error, try to open in new tab as fallback
                       setIsLoadingVideo(false);
+                      try {
+                        const newWindow = window.open(videoUrlToPlay, '_blank', 'noopener,noreferrer');
+                        if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+                          copyUrlToClipboardFallback(videoUrlToPlay, false, "Video URL copied to clipboard. Paste in a new tab to open the video.");
+                        }
+                      } catch (openError) {
+                        copyUrlToClipboardFallback(videoUrlToPlay, false, "Video URL copied to clipboard. Paste in a new tab to open the video.");
+                      }
+                      clearCompletionCheckInterval();
                     }
                   }}
                 >
@@ -3137,31 +4327,146 @@ function App() {
             )}
             {videoReadyInfo?.videoUrl ? (
               <>
+                {isLoadingVideo && !videoPlayerUrl ? (
+                  // Show loading state while chunked download is in progress
+                  <div style={{ 
+                    padding: "40px 20px", 
+                    textAlign: "center", 
+                    background: "#f8f9fa",
+                    borderRadius: "8px",
+                    border: "2px dashed #dee2e6"
+                  }}>
+                    <div style={{ fontSize: "48px", marginBottom: "16px" }}>⏳</div>
+                    <p style={{ fontSize: "16px", fontWeight: 600, color: "#495057", marginBottom: "8px" }}>
+                      Loading Video...
+                    </p>
+                    <p style={{ fontSize: "14px", color: "#6c757d", marginBottom: "20px", lineHeight: "1.5" }}>
+                      {copyUrlMessage || "Preparing video for playback. Please wait..."}
+                    </p>
+                  </div>
+                ) : videoPlayerUrl && videoPlayerUrl.startsWith('blob:') && !videoPlayerUrl.includes('s3.') ? (
+                  // Use video element directly - ONLY blob URLs are allowed (CSP blocks S3 URLs)
+                  // NEVER use direct S3 URLs - they violate CSP. Only blob URLs from chunked download are allowed.
+                  // Double-check: ensure no S3 URLs even in blob URLs (shouldn't happen, but safety first)
                 <video
+                    key={videoPlayerUrl} // Force reload when URL changes
                   ref={videoElementRef}
-                  style={styles.videoPreview}
-                  src={videoPlayerUrl || videoReadyInfo?.videoUrl || undefined}
+                    style={styles.videoPreview}
+                    src={(() => {
+                      // CRITICAL: Triple-check - only allow blob URLs, NEVER S3 URLs
+                      if (!videoPlayerUrl || !videoPlayerUrl.startsWith('blob:') || videoPlayerUrl.includes('s3.')) {
+                        console.error("[GolpoAI] BLOCKED: Video element attempted to load non-blob or S3 URL:", videoPlayerUrl);
+                        return null;
+                      }
+                      return videoPlayerUrl;
+                    })()}
                   controls
                   preload="auto"
                   crossOrigin="anonymous"
                   playsInline
+                    onLoadStart={() => {
+                      console.log("[GolpoAI] Video load started, URL:", videoPlayerUrl);
+                      setIsLoadingVideo(true);
+                    }}
                   onLoadedMetadata={(e) => {
                     const video = e.target;
+                      console.log("[GolpoAI] Video metadata loaded, dimensions:", video.videoWidth, "x", video.videoHeight);
                     if (video.videoWidth && video.videoHeight) {
                       const isLandscape = video.videoWidth > video.videoHeight;
                       setVideoOrientation(isLandscape ? "landscape" : "portrait");
                     }
-                    setIsLoadingVideo(false); // Clear loading state when video metadata is loaded
-                  }}
-                  onError={(e) => {
-                    console.warn("[GolpoAI] Video element error:", e);
-                    setIsLoadingVideo(false); // Clear loading state on error
-                  }}
-                />
-                {!videoPlayerUrl && videoReadyInfo?.videoUrl && (
+                      setIsLoadingVideo(false);
+                    }}
+                    onCanPlay={() => {
+                      console.log("[GolpoAI] Video can play");
+                      setIsLoadingVideo(false);
+                    }}
+                    onError={async (e) => {
+                      console.warn("[GolpoAI] Video element error (may be CSP blocked):", e);
+                      const video = e.target;
+                      const currentSrc = video?.src || videoPlayerUrl;
+                      
+                      // CRITICAL: If video element somehow got an S3 URL, clear it immediately
+                      if (currentSrc && (currentSrc.includes('s3.amazonaws.com') || currentSrc.includes('s3.us-east-2.amazonaws.com'))) {
+                        console.error("[GolpoAI] EMERGENCY: Video element has S3 URL in onError! Clearing immediately:", currentSrc);
+                        // Force clear the video src
+                        if (video) {
+                          video.src = '';
+                          video.setAttribute('src', '');
+                          video.load(); // Force reload with empty src
+                        }
+                        setVideoPlayerUrl(null);
+                        setIsLoadingVideo(true);
+                        setCopyUrlMessage("Retrying with secure method...");
+                        
+                        // Retry with proxy/chunked download
+                        if (videoReadyInfo?.videoUrl) {
+                          try {
+                            console.log("[GolpoAI] Retrying with prepareVideoSource after S3 URL detected in video element");
+                            await prepareVideoSource(videoReadyInfo.videoUrl);
+                            return;
+                          } catch (retryError) {
+                            console.error("[GolpoAI] Retry failed:", retryError);
+                            setIsLoadingVideo(false);
+                            setVideoPlayerUrl(null);
+                            setCopyUrlMessage("Video cannot be loaded in preview due to security restrictions. Use 'Copy URL' button below.");
+                            setTimeout(() => setCopyUrlMessage(""), 6000);
+                            return;
+                          }
+                        }
+                      }
+                      
+                      // If error is CSP-related and we have a video URL, try chunked download
+                      if (currentSrc && !currentSrc.startsWith('blob:')) {
+                        console.log("[GolpoAI] Non-blob URL detected in video element error, retrying with chunked download");
+                        setIsLoadingVideo(true);
+                        setCopyUrlMessage("Retrying with secure method...");
+                        try {
+                          await downloadVideoInChunks(currentSrc, 'video/mp4', true, videoReadyInfo?.jobId);
+                          console.log("[GolpoAI] Successfully loaded via chunked download after CSP error");
+                          return; // Successfully loaded via chunked download
+                        } catch (chunkError) {
+                          console.warn("[GolpoAI] Chunked download retry also failed:", chunkError);
+                          setIsLoadingVideo(false);
+                          setVideoPlayerUrl(null); // Clear URL to show fallback UI
+                          setCopyUrlMessage("Video cannot be loaded in preview due to security restrictions. Use 'Copy URL' button below.");
+                          setTimeout(() => setCopyUrlMessage(""), 6000);
+                          return;
+                        }
+                      }
+                      
+                      // If chunked download fails or not applicable, show fallback message
+                      setIsLoadingVideo(false);
+                      setVideoPlayerUrl(null); // Clear URL to show fallback UI
+                      setCopyUrlMessage("Video cannot be loaded in preview due to security restrictions. Use 'Copy URL' button below.");
+                      setTimeout(() => setCopyUrlMessage(""), 6000);
+                    }}
+                  />
+                ) : videoReadyInfo?.videoUrl ? (
+                  <div style={{ 
+                    padding: "40px 20px", 
+                    textAlign: "center", 
+                    background: "#f8f9fa",
+                    borderRadius: "8px",
+                    border: "2px dashed #dee2e6"
+                  }}>
+                    <div style={{ fontSize: "48px", marginBottom: "16px" }}>🎬</div>
+                    <p style={{ fontSize: "16px", fontWeight: 600, color: "#495057", marginBottom: "8px" }}>
+                      Video Preview Unavailable
+                    </p>
+                    <p style={{ fontSize: "14px", color: "#6c757d", marginBottom: "20px", lineHeight: "1.5" }}>
+                      {videoPlayerUrl === null && videoReadyInfo?.videoUrl 
+                        ? "This video is too large to preview in the modal, or cannot be loaded due to security restrictions."
+                        : "Video cannot be loaded in preview due to security restrictions."}
+                    </p>
+                    <p style={{ fontSize: "13px", color: "#868e96", marginTop: "16px" }}>
+                      Use the buttons below to copy the URL or open the video.
+                    </p>
+                  </div>
+                ) : (
                   <div style={{ padding: "20px", textAlign: "center", color: "#666" }}>
-                    <p>Video preview unavailable due to security restrictions.</p>
-                    <p>Use "Download video" button below.</p>
+                    <p>Video preview unavailable.</p>
+                    <p>Use "Play video" or "Download video" buttons below.</p>
                   </div>
                 )}
                 <div style={styles.videoReadyActions}>
@@ -3187,7 +4492,7 @@ function App() {
                       fontSize: "14px",
                     }}
                     onClick={async () => {
-                      if (!requireContentActionForMedia("play the video")) {
+                      if (!requireContentActionForMedia("open the video")) {
                         return;
                       }
                       
@@ -3198,53 +4503,40 @@ function App() {
                         return;
                       }
 
+                      // If video is already loaded and playing, just try to play it
                       const element = videoElementRef.current;
-                      if (!element) {
-                        console.warn("[GolpoAI] Video element not found, opening in new tab");
-                        openInNewTab(targetUrl);
-                        return;
-                      }
-
-                      // Try to set video source if not already set
-                      if (!element.src || element.src === window.location.href) {
-                        console.log("[GolpoAI] Setting video source to:", targetUrl);
-                        element.src = targetUrl;
-                        element.load(); // Reload the video element with new source
-                      }
-
-                      // Try to play the video
-                      try {
-                        element.currentTime = 0;
-                        const playPromise = element.play();
-                        if (playPromise?.catch) {
-                          playPromise.catch((err) => {
-                            console.warn("[GolpoAI] Could not play video in modal:", err);
-                            // If play fails, try opening in new tab as fallback
-                            setCopyUrlMessage("Cannot play in modal. Opening in new tab...");
-                            setTimeout(() => {
-                              setCopyUrlMessage("");
-                              openInNewTab(targetUrl);
-                            }, 1500);
-                          });
-                        } else {
-                          // Play started successfully
-                          setCopyUrlMessage("Playing video...");
-                          setTimeout(() => setCopyUrlMessage(""), 2000);
+                      if (element && videoPlayerUrl && element.src) {
+                        try {
+                          element.currentTime = 0;
+                          const playPromise = element.play();
+                          if (playPromise?.catch) {
+                            playPromise.catch((err) => {
+                              console.warn("[GolpoAI] Could not play video in modal:", err);
+                              // If play fails, copy URL to clipboard (avoids sandbox restrictions)
+                              setCopyUrlMessage("Cannot play in modal. Copying URL to clipboard...");
+                              setTimeout(() => {
+                                setCopyUrlMessage("");
+                                copyUrlToClipboardFallback(targetUrl, false);
+                              }, 500);
+                            });
+                          } else {
+                            setCopyUrlMessage("Playing video...");
+                            setTimeout(() => setCopyUrlMessage(""), 2000);
+                          }
+                          return;
+                        } catch (err) {
+                          console.error("[GolpoAI] Play video error:", err);
                         }
-                      } catch (err) {
-                        console.error("[GolpoAI] Play video error:", err);
-                        // If play fails, try opening in new tab as fallback
-                        setCopyUrlMessage("Cannot play in modal. Opening in new tab...");
-                        setTimeout(() => {
-                          setCopyUrlMessage("");
-                          openInNewTab(targetUrl);
-                        }, 1500);
                       }
+
+                      // If video is not loaded or can't be played, open in new tab
+                      // Use clipboard copy instead of trying to open (avoids sandbox restrictions)
+                      copyUrlToClipboardFallback(targetUrl, false);
                     }}
                     disabled={isBylineItem}
-                    title={isBylineItem ? "Open Golpo AI from page actions to play video" : undefined}
+                    title={isBylineItem ? "Open Golpo AI from page actions to open video" : undefined}
                   >
-                    Play video
+                    Open Video
                   </button>
                     <button
                       style={{
@@ -3681,7 +4973,8 @@ const styles = {
     display: "flex",
     alignItems: "center",
     gap: 10,
-    marginTop: 8,
+    marginTop: 16,
+    marginBottom: 8,
   },
   formCheckbox: {
     width: 18,

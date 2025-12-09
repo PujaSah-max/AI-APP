@@ -68,6 +68,7 @@ permissions:
     - write:page:confluence
     - read:comment:confluence
     - write:comment:confluence
+    - read:confluence-user
     - storage:app
   external:
     fetch:

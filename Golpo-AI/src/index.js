@@ -603,7 +603,8 @@ resolver.define('generateVideo', async ({ payload }) => {
     duration = '1 min',
     voice = 'solo-female',
     language = 'English',
-    includeLogo = false,
+    
+    useColor = false,
     music = 'engaging',
     style = '',
     selectedQuickAction = null,
@@ -756,10 +757,10 @@ resolver.define('generateVideo', async ({ payload }) => {
     video_voice: videoVoice,
     video_type: videoType,
     audio_only: false, // Explicitly set to false to generate video, not audio
-    use_color: false, // Enable color for video
+    use_color: useColor || false, // Enable color for video based on user selection
     video_style: true, // Enable video style
     include_watermark: false,
-    logo_url: includeLogo ? 'INCLUDE_LOGO' : null,
+    logo_url: null,
     logo_placement: null,
     language: videoLanguage,
     voice_instructions: videoVoice || '',
@@ -771,8 +772,8 @@ resolver.define('generateVideo', async ({ payload }) => {
     do_research: false,
     tts_model: 'accurate',
     style: videoVoice,
-    bg_volume: includeLogo ? 1.4 : 1.0,
-    logo: includeLogo ? 'INCLUDE_LOGO' : null,
+    bg_volume: 1.0,
+    logo: null,
     timing: timingValue,
     // new_script: videoScript || description || null, // COMMENTED OUT: Use Gemini-generated script instead of raw document
     aspect_ratio: '16:9', // Force landscape orientation (16:9 aspect ratio)
@@ -1045,15 +1046,34 @@ resolver.define('getVideoStatus', async ({ payload }) => {
 });
 
 // Fetch video file via backend to bypass CSP restrictions
+// NEW APPROACH: Return signed URL instead of video bytes to avoid 5MB GraphQL limit
+// Frontend will fetch from signed URL and convert to blob (CSP-compliant)
 resolver.define('fetchVideoFile', async ({ payload }) => {
   try {
-  const { videoUrl } = payload ?? {};
+    const { videoUrl } = payload ?? {};
 
     if (!videoUrl || typeof videoUrl !== 'string') {
-    throw new Error('Video url is required to fetch media.');
-  }
+      throw new Error('Video url is required to fetch media.');
+    }
 
-  console.log('[resolver:fetchVideoFile] Fetching video from:', videoUrl);
+    console.log('[resolver:fetchVideoFile] Returning signed URL instead of video bytes (avoids 5MB limit)');
+    
+    // Check if URL is from S3
+    const isS3Url = videoUrl.includes('s3.amazonaws.com') || videoUrl.includes('s3.us-east-2.amazonaws.com');
+    
+    if (isS3Url) {
+      // For S3 URLs, just return the URL - frontend will fetch in chunks
+      // This avoids the 5MB GraphQL limit
+      console.log('[resolver:fetchVideoFile] S3 URL detected - returning URL for chunked download');
+      return {
+        signedUrl: videoUrl, // The URL is already accessible (or pre-signed)
+        contentType: 'video/mp4',
+        useChunkedDownload: true // Signal to frontend to use chunked download
+      };
+    }
+    
+    // For non-S3 URLs, try to fetch (for small files only)
+    console.log('[resolver:fetchVideoFile] Non-S3 URL - attempting to fetch (small files only)');
     const response = await fetch(videoUrl, {
       method: 'GET',
       headers: {
@@ -1062,48 +1082,39 @@ resolver.define('fetchVideoFile', async ({ payload }) => {
       }
     });
 
-    // Check for CORS-related errors
     if (!response.ok) {
       const errorBody = await response.text().catch(() => 'Unable to read error body');
-      const corsHeaders = {
-        'access-control-allow-origin': response.headers.get('access-control-allow-origin'),
-        'access-control-allow-methods': response.headers.get('access-control-allow-methods'),
-        'access-control-allow-headers': response.headers.get('access-control-allow-headers')
-      };
-      
       console.error('[resolver:fetchVideoFile] Failed to fetch video', {
         videoUrl,
         status: response.status,
         statusText: response.statusText,
-        errorBody: errorBody.substring(0, 500), // Limit error body length
-        corsHeaders
+        errorBody: errorBody.substring(0, 500)
       });
-
-      // Provide more specific error message for CORS issues
-      if (response.status === 0 || response.status === 403) {
-        throw new Error(`CORS or access denied. Ensure S3 bucket CORS is configured. Status: ${response.status}`);
-      }
-      
       throw new Error(`Failed to fetch video content. Status: ${response.status} ${response.statusText}`);
     }
 
-    // Log CORS headers for debugging
-    const corsHeaders = {
-      'access-control-allow-origin': response.headers.get('access-control-allow-origin'),
-      'access-control-expose-headers': response.headers.get('access-control-expose-headers')
-    };
-    console.log('[resolver:fetchVideoFile] CORS headers received:', corsHeaders);
-
     const arrayBuffer = await response.arrayBuffer();
+    const contentLength = response.headers.get('content-length') || arrayBuffer.byteLength;
+    const MAX_SIZE = 4 * 1024 * 1024; // 4MB - safe limit
+    
+    // If file is too large, return URL for chunked download instead
+    if (contentLength > MAX_SIZE) {
+      console.log('[resolver:fetchVideoFile] File too large, returning URL for chunked download');
+      return {
+        signedUrl: videoUrl,
+        contentType: response.headers.get('content-type') || 'video/mp4',
+        useChunkedDownload: true
+      };
+    }
+    
+    // Only return bytes for small files
     const base64Data = Buffer.from(arrayBuffer).toString('base64');
     const contentType = response.headers.get('content-type') || 'video/mp4';
-    const contentLength = response.headers.get('content-length') || arrayBuffer.byteLength;
 
-    console.log('[resolver:fetchVideoFile] Successfully fetched video', {
+    console.log('[resolver:fetchVideoFile] Successfully fetched small video', {
       contentType,
       contentLength,
       sizeInMB: (contentLength / (1024 * 1024)).toFixed(2)
-      
     });
 
     return {
@@ -1112,18 +1123,325 @@ resolver.define('fetchVideoFile', async ({ payload }) => {
       contentLength
     };
   } catch (error) {
-    console.error('[resolver:fetchVideoFile] Error fetching video file:', {
+    console.error('[resolver:fetchVideoFile] Error:', {
       videoUrl,
-      error: error.message,
-      stack: error.stack
+      error: error.message
     });
+    throw new Error(`Failed to fetch video file: ${error.message}`);
+  }
+});
+
+// Helper function for fetch with timeout
+const fetchWithTimeout = async (url, options = {}, timeoutMs = 20000) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('Request timeout');
+    }
+    throw error;
+  }
+};
+
+// Upload video to Atlassian Media API and return mediaId
+// This streams the video from S3 to Media API without loading it into memory
+resolver.define('uploadVideoToMedia', async ({ payload, context }) => {
+  try {
+    const { videoUrl } = payload ?? {};
     
-    // Provide helpful error message for CORS issues
-    if (error.message.includes('CORS') || error.message.includes('Failed to fetch')) {
-      throw new Error(`CORS configuration issue. Please ensure S3 bucket 'golpo-stage-private' has CORS enabled with AllowedOrigin: '*' and AllowedMethod: 'GET'. Original error: ${error.message}`);
+    if (!videoUrl || typeof videoUrl !== 'string') {
+      throw new Error('Video URL is required');
     }
     
-    throw new Error(`Failed to fetch video file: ${error.message}`);
+    console.log('[resolver:uploadVideoToMedia] Starting upload to Media API:', videoUrl);
+    
+    // Fetch video from S3 as a stream (not loading into memory)
+    const videoResponse = await fetch(videoUrl, {
+      method: 'GET',
+      headers: {
+        'Accept': 'video/mp4,video/*,*/*',
+      }
+    });
+    
+    if (!videoResponse.ok) {
+      throw new Error(`Failed to fetch video from S3: ${videoResponse.status} ${videoResponse.statusText}`);
+    }
+    
+    // Get content type and size
+    const contentType = videoResponse.headers.get('content-type') || 'video/mp4';
+    const contentLength = videoResponse.headers.get('content-length');
+    
+    console.log('[resolver:uploadVideoToMedia] Video metadata:', {
+      contentType,
+      contentLength: contentLength ? `${(parseInt(contentLength) / (1024 * 1024)).toFixed(2)}MB` : 'unknown'
+    });
+    
+    // Convert ReadableStream to Buffer for Media API upload
+    // Note: For very large files, we should stream, but Forge API requires Buffer
+    const arrayBuffer = await videoResponse.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    
+    // Upload to Confluence Media API using REST API
+    // POST /wiki/rest/api/media/upload
+    const filename = `golpo-video-${Date.now()}.mp4`;
+    const boundary = `----WebKitFormBoundary${Date.now()}`;
+    
+    // Create multipart form data manually
+    const formDataParts = [
+      `--${boundary}`,
+      `Content-Disposition: form-data; name="file"; filename="${filename}"`,
+      `Content-Type: ${contentType}`,
+      '',
+      buffer,
+      `--${boundary}--`
+    ];
+    
+    // Combine parts into single buffer
+    const formDataBuffer = Buffer.concat(
+      formDataParts.map(part => 
+        typeof part === 'string' ? Buffer.from(part + '\r\n', 'utf8') : Buffer.concat([part, Buffer.from('\r\n')])
+      )
+    );
+    
+    const uploadResponse = await api.asUser().requestConfluence(
+      route`/wiki/rest/api/media/upload`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        },
+        body: formDataBuffer,
+      }
+    );
+    
+    if (!uploadResponse.ok) {
+      const errorText = await uploadResponse.text();
+      throw new Error(`Media API upload failed: ${uploadResponse.status} ${errorText}`);
+    }
+    
+    const uploadData = await uploadResponse.json();
+    // Media API returns data in different formats, try multiple paths
+    const mediaId = uploadData.results?.[0]?.data?.id || 
+                    uploadData.results?.[0]?.id ||
+                    uploadData.data?.id ||
+                    uploadData.id;
+    
+    if (!mediaId) {
+      throw new Error('Media API did not return mediaId');
+    }
+    
+    console.log('[resolver:uploadVideoToMedia] ✅ Successfully uploaded to Media API, mediaId:', mediaId);
+    
+    return {
+      mediaId: mediaId,
+      contentType: contentType
+    };
+  } catch (error) {
+    console.error('[resolver:uploadVideoToMedia] Error:', error);
+    throw new Error(`Failed to upload video to Media API: ${error.message}`);
+  }
+});
+
+// Get playback URL for a mediaId
+// Returns a URL that can be used directly in <video> element with CSP compliance
+resolver.define('getPlaybackUrl', async ({ payload, context }) => {
+  try {
+    const { mediaId } = payload ?? {};
+    
+    if (!mediaId || typeof mediaId !== 'string') {
+      throw new Error('Media ID is required');
+    }
+    
+    console.log('[resolver:getPlaybackUrl] Getting playback URL for mediaId:', mediaId);
+    
+    // Get playback URL from Confluence Media API
+    // GET /wiki/rest/api/media/{mediaId}/playback
+    const playbackResponse = await api.asUser().requestConfluence(
+      route`/wiki/rest/api/media/${mediaId}/playback`,
+      {
+        method: 'GET',
+      }
+    );
+    
+    if (!playbackResponse.ok) {
+      const errorText = await playbackResponse.text();
+      throw new Error(`Failed to get playback URL: ${playbackResponse.status} ${errorText}`);
+    }
+    
+    const playbackData = await playbackResponse.json();
+    const playbackUrl = playbackData.url || playbackData.playbackUrl;
+    
+    if (!playbackUrl) {
+      throw new Error('Media API did not return playback URL');
+    }
+    
+    console.log('[resolver:getPlaybackUrl] ✅ Got playback URL:', playbackUrl);
+    
+    // Append ?client=forge to ensure proper authentication
+    const finalUrl = playbackUrl.includes('?') 
+      ? `${playbackUrl}&client=forge`
+      : `${playbackUrl}?client=forge`;
+    
+    return {
+      playbackUrl: finalUrl,
+      mediaId: mediaId
+    };
+  } catch (error) {
+    console.error('[resolver:getPlaybackUrl] Error:', error);
+    throw new Error(`Failed to get playback URL: ${error.message}`);
+  }
+});
+
+// Get signed video URL - returns a signed URL that frontend can fetch directly
+// This avoids sending video bytes through Forge's GraphQL (5MB limit)
+// DEPRECATED: Use uploadVideoToMedia + getPlaybackUrl instead
+resolver.define('getSignedVideoUrl', async ({ payload }) => {
+  try {
+    const { videoUrl } = payload ?? {};
+    
+    if (!videoUrl || typeof videoUrl !== 'string') {
+      throw new Error('Video URL is required');
+    }
+    
+    console.log('[resolver:getSignedVideoUrl] Getting signed URL for:', videoUrl);
+    
+    // Check if URL is from S3
+    const isS3Url = videoUrl.includes('s3.amazonaws.com') || videoUrl.includes('s3.us-east-2.amazonaws.com');
+    
+    if (isS3Url) {
+      // For S3 URLs, extract the key and generate a signed URL
+      // Example: https://golpo-stage-private.s3.us-east-2.amazonaws.com/files/abc123.mp4
+      // Key would be: files/abc123.mp4
+      
+      try {
+        // Extract S3 key from URL
+        const urlObj = new URL(videoUrl);
+        const key = urlObj.pathname.startsWith('/') ? urlObj.pathname.substring(1) : urlObj.pathname;
+        
+        console.log('[resolver:getSignedVideoUrl] Extracted S3 key:', key);
+        
+        // For now, return the original URL if it's already accessible
+        // If you have AWS SDK configured, you can generate a signed URL here:
+        // const AWS = require('aws-sdk');
+        // const s3 = new AWS.S3();
+        // const signedUrl = s3.getSignedUrl('getObject', {
+        //   Bucket: 'golpo-stage-private',
+        //   Key: key,
+        //   Expires: 300 // 5 minutes
+        // });
+        
+        // For now, return the URL as-is (assuming it's already accessible or pre-signed)
+        // Frontend will fetch it directly
+        return {
+          signedUrl: videoUrl,
+          contentType: 'video/mp4',
+          expiresIn: 300 // 5 minutes
+        };
+      } catch (parseError) {
+        console.error('[resolver:getSignedVideoUrl] Failed to parse S3 URL:', parseError);
+        // Fallback: return URL as-is
+        return {
+          signedUrl: videoUrl,
+          contentType: 'video/mp4',
+          expiresIn: 300
+        };
+      }
+    }
+    
+    // For non-S3 URLs, return as-is (frontend will fetch directly)
+    return {
+      signedUrl: videoUrl,
+      contentType: 'video/mp4',
+      expiresIn: 300
+    };
+  } catch (error) {
+    console.error('[resolver:getSignedVideoUrl] Error:', error);
+    throw new Error(`Failed to get signed video URL: ${error.message}`);
+  }
+});
+
+// Fetch a single chunk of video using HTTP Range request
+// This allows downloading large files in chunks, bypassing Forge's 6MB payload limit
+resolver.define('fetchVideoChunk', async ({ payload }) => {
+  const { videoUrl, startByte, endByte } = payload ?? {};
+
+  if (!videoUrl) {
+    return {
+      status: 400,
+      error: 'videoUrl is required to fetch the video chunk.',
+    };
+  }
+
+  try {
+    // Build Range header for partial content request
+    const rangeHeader = endByte
+      ? `bytes=${startByte || 0}-${endByte}`
+      : `bytes=${startByte || 0}-`;
+
+    console.log(`[resolver:fetchVideoChunk] Fetching video chunk: ${rangeHeader} from ${videoUrl}`);
+
+    const response = await fetchWithTimeout(
+      videoUrl,
+      {
+        method: 'GET',
+        headers: {
+          'Accept': 'video/mp4, video/*, */*',
+          'Range': rangeHeader,
+        },
+      },
+      20000 // 20 second timeout
+    );
+
+    if (!response.ok && response.status !== 206) {
+      // 206 is Partial Content, which is expected for Range requests
+      const preview = await response.text().catch(() => 'Unable to read error body');
+      console.error(`[resolver:fetchVideoChunk] Failed to fetch video chunk ${videoUrl}: ${response.status}`, preview);
+      return {
+        status: response.status,
+        error: `Failed to fetch video chunk: ${response.statusText}`,
+        details: preview.slice(0, 200),
+      };
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const base64Data = Buffer.from(arrayBuffer).toString('base64');
+    const contentType = response.headers.get('content-type') || 'video/mp4';
+    const contentRange = response.headers.get('content-range');
+   
+    // Parse total file size from Content-Range header (e.g., "bytes 0-1023/5242880")
+    let totalSize = null;
+    if (contentRange) {
+      const match = contentRange.match(/\/(\d+)/);
+      if (match) {
+        totalSize = parseInt(match[1], 10);
+      }
+    }
+
+    console.log(`[resolver:fetchVideoChunk] Successfully fetched video chunk, size: ${arrayBuffer.byteLength} bytes, total: ${totalSize || 'unknown'}`);
+
+    return {
+      status: 200,
+      base64Data,
+      contentType,
+      chunkSize: arrayBuffer.byteLength,
+      totalSize,
+      isComplete: !endByte || (totalSize && arrayBuffer.byteLength >= totalSize),
+    };
+  } catch (error) {
+    console.error('[resolver:fetchVideoChunk] Error fetching video chunk:', error);
+    return {
+      status: 500,
+      error: error.message || 'Failed to fetch video chunk.',
+    };
   }
 });
 
@@ -1410,31 +1728,49 @@ const fetchUserByAccountId = async (accountId, useAsApp = false) => {
     console.log('[fetchUserByAccountId] Fetching user info for accountId:', accountId);
     const apiCall = useAsApp ? api.asApp() : api.asUser();
     
-    // Try to fetch user by accountId using Confluence API
-    // Note: Confluence API v2 uses accountId in the path
-    const userResponse = await apiCall.requestConfluence(
+    // Try Confluence API v2 first (accountId in path)
+    let userResponse = await apiCall.requestConfluence(
       route`/wiki/api/v2/users/${accountId}`
     );
     
-    if (userResponse.ok) {
+    // If v2 API fails, try REST API v1 with query parameter
+    if (!userResponse.ok) {
+      console.log('[fetchUserByAccountId] v2 API failed, trying REST API v1 with query parameter...');
+      try {
+        // REST API v1 uses query parameter: /wiki/rest/api/user?accountId={accountId}
+        // Include query parameter directly in route template (same pattern as other endpoints)
+        userResponse = await apiCall.requestConfluence(
+          route`/wiki/rest/api/user?accountId=${accountId}`
+        );
+      } catch (v1Error) {
+        console.warn('[fetchUserByAccountId] REST API v1 also failed:', v1Error?.message);
+        // Keep the original response for error handling
+      }
+    }
+    
+    if (userResponse && userResponse.ok) {
       const userData = await userResponse.json();
       console.log('[fetchUserByAccountId] ✅ Successfully fetched user:', {
-        accountId: userData.accountId,
-        displayName: userData.displayName,
-        publicName: userData.publicName,
+        accountId: userData.accountId || userData.userKey || accountId,
+        displayName: userData.displayName || userData.displayName || userData.fullName,
+        publicName: userData.publicName || userData.displayName || userData.fullName,
+        name: userData.name || userData.displayName || userData.fullName,
+        username: userData.username || userData.userKey || null,
       });
+      
+      // Handle different response formats (v2 vs v1)
       return {
-        accountId: userData.accountId || accountId,
-        displayName: userData.displayName || userData.publicName || userData.name || null,
-        publicName: userData.publicName || userData.displayName || null,
-        name: userData.name || userData.displayName || userData.publicName || null,
-        username: userData.username || null,
+        accountId: userData.accountId || userData.userKey || accountId,
+        displayName: userData.displayName || userData.fullName || userData.publicName || userData.name || null,
+        publicName: userData.publicName || userData.displayName || userData.fullName || null,
+        name: userData.name || userData.displayName || userData.fullName || userData.publicName || null,
+        username: userData.username || userData.userKey || null,
       };
     } else {
-      const errorText = await userResponse.text();
+      const errorText = userResponse ? await userResponse.text() : 'No response';
       console.warn('[fetchUserByAccountId] Failed to fetch user:', {
         accountId,
-        status: userResponse.status,
+        status: userResponse?.status || 'unknown',
         error: errorText,
       });
       return null;
@@ -1456,48 +1792,48 @@ const buildCommentBodyHtml = async (videoUrl, requestedBy, useAsApp = false) => 
   
   let generatedBy = null;
   
-  // Always try to fetch from accountId first if available (most reliable source)
-  if (requestedBy?.accountId) {
-    console.log('[buildCommentBodyHtml] Fetching user info from accountId:', requestedBy.accountId);
-    const fetchedUser = await fetchUserByAccountId(requestedBy.accountId, useAsApp);
-    if (fetchedUser) {
-      generatedBy = fetchedUser.displayName || fetchedUser.publicName || fetchedUser.name || null;
-      console.log('[buildCommentBodyHtml] ✅ Fetched displayName from API:', generatedBy);
+  // First, try to use displayName from stored requestedBy object (captured when job was created)
+  // This is the most reliable since it was fetched with user context
+  if (requestedBy?.displayName) {
+    generatedBy = requestedBy.displayName;
+    console.log('[buildCommentBodyHtml] ✅ Using displayName from stored requestedBy:', generatedBy);
+  } else if (requestedBy?.publicName) {
+    generatedBy = requestedBy.publicName;
+    console.log('[buildCommentBodyHtml] ✅ Using publicName from stored requestedBy:', generatedBy);
+  } else if (requestedBy?.name) {
+    generatedBy = requestedBy.name;
+    console.log('[buildCommentBodyHtml] ✅ Using name from stored requestedBy:', generatedBy);
+  }
+  
+  // If we don't have a name yet, try to fetch from accountId (fallback for old jobs or missing data)
+  if (!generatedBy && requestedBy?.accountId) {
+    console.log('[buildCommentBodyHtml] No displayName in stored data, fetching user info from accountId:', requestedBy.accountId);
+    try {
+      const fetchedUser = await fetchUserByAccountId(requestedBy.accountId, useAsApp);
+      if (fetchedUser) {
+        generatedBy = fetchedUser.displayName || fetchedUser.publicName || fetchedUser.name || null;
+        console.log('[buildCommentBodyHtml] ✅ Fetched displayName from API:', generatedBy);
+      }
+    } catch (fetchError) {
+      console.warn('[buildCommentBodyHtml] Failed to fetch user from accountId:', fetchError?.message);
     }
   }
   
-  // Fallback to existing displayName/publicName/name if fetch failed or no accountId
-  if (!generatedBy) {
-    generatedBy = requestedBy?.displayName || requestedBy?.publicName || requestedBy?.name || null;
-    console.log('[buildCommentBodyHtml] Using displayName from requestedBy:', generatedBy);
-  }
-  
-  // Final fallback to 'User' if still no name found
-  if (!generatedBy) {
-    console.warn('[buildCommentBodyHtml] No username found, using default "User"');
-    generatedBy = 'User';
-  }
-  
+  // Final fallback to 'User' if still no name found (same as friend's pattern: jobData.generatedBy?.displayName || 'User')
+  generatedBy = generatedBy || 'User';
   console.log('[buildCommentBodyHtml] Final generatedBy (displayName):', generatedBy);
 
-  // Build user mention - always show username as plain text (same as Jira implementation)
+  // Build user mention - use "Generated by" format to match friend's code
   // Position: BELOW the link (can be changed to ABOVE by swapping return statement)
-  let requestedByHtml = '';
-  if (generatedBy && generatedBy !== 'User') {
-    // Escape username for HTML safety
-    const escapedUsername = String(generatedBy).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    requestedByHtml = `<p style="margin-top: 12px; margin-bottom: 0;"><strong>Created by:</strong> ${escapedUsername}</p>`;
-    console.log('[buildCommentBodyHtml] Generated plain text username:', requestedByHtml);
-  } else {
-    console.warn('[buildCommentBodyHtml] No displayName found, using default "User"');
-    // Still show "Created by: User" if no displayName found
-    requestedByHtml = `<p style="margin-top: 12px; margin-bottom: 0;"><strong>Created by:</strong> User</p>`;
-  }
+  // Escape username for HTML safety
+  const escapedUsername = String(generatedBy).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const requestedByHtml = `<p style="margin-top: 12px; margin-bottom: 0;"><strong>Generated by:</strong> ${escapedUsername}</p>`;
+  console.log('[buildCommentBodyHtml] Generated comment with username:', requestedByHtml);
 
   const finalHtml = `<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>${requestedByHtml}`;
   console.log('[buildCommentBodyHtml] Final HTML:', finalHtml);
   
-  // Show "Created by" BELOW the link (default)
+  // Show "Generated by" BELOW the link (default)
   // To show ABOVE the link, change to: return `${requestedByHtml}<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>`;
   return finalHtml;
 };
@@ -1659,11 +1995,10 @@ resolver.define('pollVideoStatusBackground', async () => {
           console.log('[pollVideoStatusBackground] Using requestedBy directly from jobData:', finalRequestedBy);
         }
         
-        // If still missing or incomplete, try to retrieve from separate user storage
+        // If still missing or incomplete (missing displayName), try to retrieve from separate user storage
         if (!finalRequestedBy || (!finalRequestedBy.displayName && !finalRequestedBy.publicName && !finalRequestedBy.name && !finalRequestedBy.username)) {
           console.warn('[pollVideoStatusBackground] requestedBy missing or incomplete in job data, trying to retrieve from storage...');
           console.log('[pollVideoStatusBackground] Current requestedBy:', JSON.stringify(finalRequestedBy, null, 2));
-          console.log('[pollVideoStatusBackground] Full jobData:', JSON.stringify(jobData, null, 2));
           
           // Try to get accountId from jobData to look up user info
           const accountIdToLookup = finalRequestedBy?.accountId || finalRequestedBy?.id || jobData.requestedBy?.accountId || jobData.requestedBy?.id;
@@ -1674,10 +2009,19 @@ resolver.define('pollVideoStatusBackground', async () => {
               const userStorageKey = `user-info-${accountIdToLookup}`;
               const storedUserInfo = await storage.get(userStorageKey);
               if (storedUserInfo) {
-                finalRequestedBy = storedUserInfo;
+                // Merge stored user info with existing requestedBy to preserve all data
+                finalRequestedBy = {
+                  ...finalRequestedBy,
+                  ...storedUserInfo,
+                  accountId: accountIdToLookup, // Ensure accountId is set
+                };
                 console.log('[pollVideoStatusBackground] ✅ Retrieved user info from separate storage:', finalRequestedBy);
               } else {
                 console.warn('[pollVideoStatusBackground] User info not found in separate storage for accountId:', accountIdToLookup);
+                // If we have accountId but no stored info, try to fetch from API (but only if we have accountId)
+                if (accountIdToLookup && !finalRequestedBy) {
+                  finalRequestedBy = { accountId: accountIdToLookup };
+                }
               }
             } catch (storageError) {
               console.warn('[pollVideoStatusBackground] Failed to retrieve user info from storage:', storageError);
@@ -1687,8 +2031,14 @@ resolver.define('pollVideoStatusBackground', async () => {
           }
         }
         
-        // Final check - log what we're passing
+        // Final check - log what we're passing (especially displayName)
         console.log('[pollVideoStatusBackground] Final requestedBy to pass:', JSON.stringify(finalRequestedBy, null, 2));
+        if (finalRequestedBy) {
+          console.log('[pollVideoStatusBackground] ✅ Has displayName:', !!finalRequestedBy.displayName, 'Value:', finalRequestedBy.displayName);
+          console.log('[pollVideoStatusBackground] ✅ Has publicName:', !!finalRequestedBy.publicName, 'Value:', finalRequestedBy.publicName);
+          console.log('[pollVideoStatusBackground] ✅ Has name:', !!finalRequestedBy.name, 'Value:', finalRequestedBy.name);
+          console.log('[pollVideoStatusBackground] ✅ Has accountId:', !!finalRequestedBy.accountId, 'Value:', finalRequestedBy.accountId);
+        }
 
         // Check video status
         const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;

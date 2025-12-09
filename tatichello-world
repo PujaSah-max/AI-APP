@@ -1,0 +1,17 @@
+*   [33m2df3491[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m Merge pull request #4 from PujaSah-max/feature/video-completion-api-check
+[31m|[m[32m\[m  
+[31m|[m * [33medd9dff[m[33m ([m[1;31morigin/feature/video-completion-api-check[m[33m, [m[1;32mfeature/video-completion-api-check[m[33m)[m Feature: Check video completion directly from Golpo API instead of comments - Replace comment-based completion check with direct API status polling - Use getVideoStatus endpoint to check video generation status - Extract video URL from API response when status is complete - Show completion popup when video is ready from API - Remove dependency on comments for completion detection
+* [32m|[m [33md839de1[m Refactor: Update video generation logic to use documentText for prompt and simplify duration handling
+* [32m|[m [33m87355e9[m Refactor: Comment out Gemini AI script generation and duration validation logic
+[32m|[m[32m/[m  
+* [33ma11481d[m Fix: Convert to ES modules and improve backend API for page ID extraction - Fixed Resolver constructor error by using ES module syntax - Enhanced backend API to extract page ID from multiple context paths - Improved frontend to use backend API as primary source for page info - Added space-based fallback for page ID extraction
+*   [33m272e39a[m Merge branch 'feature/production-error-handling'
+[33m|[m[34m\[m  
+[33m|[m * [33mc8c7dfe[m[33m ([m[1;31morigin/feature/production-error-handling[m[33m, [m[1;32mfeature/production-error-handling[m[33m)[m Add comprehensive error handling for production deployment
+* [34m|[m [33m8a44301[m Merge pull request #2 from PujaSah-max/feature/background-video-processing
+[35m|[m[34m\[m[34m|[m 
+[35m|[m *   [33m10c4123[m[33m ([m[1;31morigin/feature/background-video-processing[m[33m, [m[1;32mfeature/background-video-processing[m[33m)[m Merge branch 'main' into feature/background-video-processing
+[35m|[m [1;31m|[m[35m\[m  
+[35m|[m [1;31m|[m[35m/[m  
+[35m|[m[35m/[m[1;31m|[m   
+* [1;31m|[m [33mb946497[m Add Gemini AI integration for document-to-video script conversion, update permissions for API access, and implement duration validation in the frontend. Enhance user experience with warnings for insufficient video duration based on document length.
