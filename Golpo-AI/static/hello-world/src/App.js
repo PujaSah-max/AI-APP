@@ -829,12 +829,12 @@ function App() {
     }
   }, []);
 
-  const clearCompletionCheckInterval = useCallback(() => {
-    if (completionCheckIntervalRef.current) {
-      clearInterval(completionCheckIntervalRef.current);
-      completionCheckIntervalRef.current = null;
-    }
-  }, []);
+  // const clearCompletionCheckInterval = useCallback(() => {
+  //   if (completionCheckIntervalRef.current) {
+  //     clearInterval(completionCheckIntervalRef.current);
+  //     completionCheckIntervalRef.current = null;
+  //   }
+  // }, []);
 
   const extractJobIdFromResponse = (payload) => {
     if (!payload) {
@@ -2080,13 +2080,15 @@ function App() {
       console.log("[GolpoAI] Calling backend to generate video...");
 
       // Extract documentText and create prompt (same as backend does)
-      const documentText = golpoAIDocument?.fullText || golpoAIDocument?.content || '';
-      const prompt = JSON.stringify({ content: documentText });
+      // Include title and content, but exclude footer comments from prompt
+      // Use plain text directly (no JSON wrapper)
+      const title = golpoAIDocument?.title || '';
+      const content = golpoAIDocument?.content || '';
+      const documentText = title ? `TITLE: ${title}\n\nCONTENT:\n${content}` : content;
       
       // Log the prompt that will be sent to backend
       console.log("[GolpoAI] ========== PROMPT FOR VIDEO GENERATION ==========");
-      console.log("[GolpoAI] Prompt (JSON string):", prompt);
-      console.log("[GolpoAI] Prompt (parsed):", JSON.parse(prompt));
+      console.log("[GolpoAI] Prompt (plain text):", documentText);
       console.log("[GolpoAI] Document text length:", documentText.length, "characters");
       console.log("[GolpoAI] ========== END OF PROMPT ==========");
 
