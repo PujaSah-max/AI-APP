@@ -560,8 +560,10 @@ resolver.define('generateVideo', async ({ payload }) => {
   }
 
   // Build the prompt from the document
-  // Use fullText which contains title, content, and comments
-  const documentText = document.fullText || document.content || '';
+  // Include title and content, but exclude footer comments from prompt
+  const title = document.title || '';
+  const content = document.content || '';
+  const documentText = title ? `TITLE: ${title}\nCONTENT:\n${content}` : content;
 
   if (!documentText || documentText.trim() === '') {
     throw new Error('Document content is empty. Cannot generate video.');
@@ -593,8 +595,8 @@ resolver.define('generateVideo', async ({ payload }) => {
   //   console.log('[resolver:generateVideo] ========== END OF ORIGINAL DOCUMENT ==========');
   // }
   
-  // Convert documentText to JSON format for video generation
-  const prompt = JSON.stringify({ content: documentText });
+  // Use documentText directly as prompt (plain text, no JSON wrapper)
+  const prompt = documentText;
 
   // Extract values from videoSpecs
   const {
@@ -634,8 +636,8 @@ resolver.define('generateVideo', async ({ payload }) => {
     return finalMinutes;
   };
 
-  // Get content for duration calculation
-  const contentForDuration = document?.fullText || document?.content || prompt || description || '';
+  // Get content for duration calculation (exclude footer comments)
+  const contentForDuration = document?.content || prompt || description || '';
   const calculatedDuration = calculateDurationFromContent(contentForDuration);
 
   // Map duration to timing value
