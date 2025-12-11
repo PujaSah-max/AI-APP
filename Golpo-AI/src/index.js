@@ -850,46 +850,57 @@ resolver.define('generateVideo', async ({ payload }) => {
     // If we have a jobId and pageId, store job info in Forge storage for background polling
     if (jobId && pageId) {
       try {
-        // Fetch complete user data using Confluence API endpoint and store in Forge storage
+        // Fetch complete user data using Confluence API endpoint and store basic info with the job
         let requestedBy = null;
         try {
-          console.log('[resolver:generateVideo] Fetching user data from Confluence API...');
-          const meResponse = await api.asUser().requestConfluence(
+          console.log('[resolver:generateVideo] Fetching current user data from Confluence API...');
+          
+          // Prefer Confluence API v2: GET /wiki/api/v2/users/me
+          let meResponse = await api.asUser().requestConfluence(
             route`/wiki/api/v2/users/me`
           );
           
-          if (meResponse.ok) {
+          // Fallback to REST API v1: GET /wiki/rest/api/user/current
+          if (!meResponse.ok) {
+            console.warn('[resolver:generateVideo] /wiki/api/v2/users/me failed, trying /wiki/rest/api/user/current...');
+            try {
+              meResponse = await api.asUser().requestConfluence(
+                route`/wiki/rest/api/user/current`
+              );
+            } catch (v1Error) {
+              console.warn('[resolver:generateVideo] /wiki/rest/api/user/current also failed:', v1Error?.message);
+            }
+          }
+          
+          if (meResponse && meResponse.ok) {
             const me = await meResponse.json();
             console.log('[resolver:generateVideo] User data received:', JSON.stringify(me, null, 2));
             
-            // Extract all relevant user information
+            // Normalise current user into requestedBy object
             requestedBy = {
-              accountId: me.accountId || me.id || null,
-              id: me.id || me.accountId || null,
+              accountId: me.accountId || me.userKey || me.key || null,
               displayName: me.displayName || me.publicName || me.name || null,
               publicName: me.publicName || me.displayName || null,
-              name: me.name || me.displayName || me.publicName || null,
+              name: me.name || me.displayName || null,
               username: me.username || null,
-              email: me.email || null,
-              profilePicture: me.profilePicture || null,
-              type: me.type || 'user',
-              // Store timestamp when user data was captured
-              capturedAt: new Date().toISOString(),
+              email: me.email || me.emailAddress || null,
+              profilePicture:
+                me.profilePicture?.path ||
+                me.profilePicture?.href ||
+                me.avatarUrls?.['48x48'] ||
+                me.avatarUrls?.['32x32'] ||
+                me.avatarUrls?.['24x24'] ||
+                me.avatarUrls?.['16x16'] ||
+                null,
+              type: me.type || me.userType || null,
             };
             
-            // Store user info separately in Forge storage for future reference
+            // Store user info separately in Forge storage for future reference (optional)
             if (requestedBy.accountId) {
               const userStorageKey = `user-info-${requestedBy.accountId}`;
               try {
                 await storage.set(userStorageKey, {
-                  accountId: requestedBy.accountId,
-                  displayName: requestedBy.displayName,
-                  publicName: requestedBy.publicName,
-                  name: requestedBy.name,
-                  username: requestedBy.username,
-                  email: requestedBy.email,
-                  profilePicture: requestedBy.profilePicture,
-                  type: requestedBy.type,
+                  ...requestedBy,
                   lastUpdated: new Date().toISOString(),
                 });
                 console.log('[resolver:generateVideo] ✅ Stored user info in Forge storage:', userStorageKey);
@@ -904,10 +915,10 @@ resolver.define('generateVideo', async ({ payload }) => {
               displayName: requestedBy.displayName,
             });
           } else {
-            const errorText = await meResponse.text();
-            console.warn('[resolver:generateVideo] Failed to fetch current user info for job metadata:', {
-              status: meResponse.status,
-              statusText: meResponse.statusText,
+            const errorText = meResponse ? await meResponse.text() : 'No response';
+            console.warn('[resolver:generateVideo] Failed to fetch current user info for job metadata (both endpoints):', {
+              status: meResponse?.status || 'unknown',
+              statusText: meResponse?.statusText || 'unknown',
               error: errorText,
             });
           }
@@ -1047,35 +1058,30 @@ resolver.define('getVideoStatus', async ({ payload }) => {
   }
 });
 
-// Fetch video file via backend to bypass CSP restrictions
-// NEW APPROACH: Return signed URL instead of video bytes to avoid 5MB GraphQL limit
-// Frontend will fetch from signed URL and convert to blob (CSP-compliant)
 resolver.define('fetchVideoFile', async ({ payload }) => {
   try {
-    const { videoUrl } = payload ?? {};
+  const { videoUrl } = payload ?? {};
 
     if (!videoUrl || typeof videoUrl !== 'string') {
-      throw new Error('Video url is required to fetch media.');
-    }
+    throw new Error('Video url is required to fetch media.');
+  }
 
-    console.log('[resolver:fetchVideoFile] Returning signed URL instead of video bytes (avoids 5MB limit)');
-    
-    // Check if URL is from S3
-    const isS3Url = videoUrl.includes('s3.amazonaws.com') || videoUrl.includes('s3.us-east-2.amazonaws.com');
-    
-    if (isS3Url) {
-      // For S3 URLs, just return the URL - frontend will fetch in chunks
-      // This avoids the 5MB GraphQL limit
-      console.log('[resolver:fetchVideoFile] S3 URL detected - returning URL for chunked download');
-      return {
-        signedUrl: videoUrl, // The URL is already accessible (or pre-signed)
-        contentType: 'video/mp4',
-        useChunkedDownload: true // Signal to frontend to use chunked download
-      };
-    }
-    
-    // For non-S3 URLs, try to fetch (for small files only)
-    console.log('[resolver:fetchVideoFile] Non-S3 URL - attempting to fetch (small files only)');
+    // We now prefer a SIMPLE path for small videos:
+    // - Always try to download the file once on the backend
+    // - If it's reasonably small (<= MAX_SIZE), return base64 bytes
+    // - If it's larger, return the original URL and let the frontend use chunked HTTP streaming
+    //
+    // This works for BOTH S3 and non-S3 URLs, and avoids sending large blobs
+    // through Forge's GraphQL response (5MB limit).
+    const isS3Url =
+      videoUrl.includes('s3.amazonaws.com') ||
+      videoUrl.includes('s3.us-east-2.amazonaws.com');
+
+    console.log('[resolver:fetchVideoFile] Fetching video bytes to determine size', {
+      videoUrl,
+      isS3Url,
+    });
+
     const response = await fetch(videoUrl, {
       method: 'GET',
       headers: {
@@ -1096,24 +1102,35 @@ resolver.define('fetchVideoFile', async ({ payload }) => {
     }
 
     const arrayBuffer = await response.arrayBuffer();
-    const contentLength = response.headers.get('content-length') || arrayBuffer.byteLength;
-    const MAX_SIZE = 4 * 1024 * 1024; // 4MB - safe limit
+    const contentLengthHeader = response.headers.get('content-length');
+    const contentLength = contentLengthHeader
+      ? parseInt(contentLengthHeader, 10)
+      : arrayBuffer.byteLength;
+    // IMPORTANT: Forge GraphQL responses are limited to 5MB (5,242,880 bytes) total.
+    // Base64 encoding adds ~33% overhead, plus JSON wrapper bytes.
+    // To stay safely under the 5MB cap, we only inline videos up to ~3MB raw.
+    const MAX_SIZE = 3 * 1024 * 1024; // 3MB raw bytes (~4MB base64) to avoid 5MB GraphQL limit
     
     // If file is too large, return URL for chunked download instead
     if (contentLength > MAX_SIZE) {
-      console.log('[resolver:fetchVideoFile] File too large, returning URL for chunked download');
+      console.log('[resolver:fetchVideoFile] File too large for inline base64, returning URL for chunked download', {
+        contentLength,
+        sizeInMB: (contentLength / (1024 * 1024)).toFixed(2),
+        isS3Url,
+      });
       return {
         signedUrl: videoUrl,
         contentType: response.headers.get('content-type') || 'video/mp4',
-        useChunkedDownload: true
+        useChunkedDownload: true,
+        contentLength,
       };
     }
     
-    // Only return bytes for small files
+    // Only return bytes for small files (safe to send as base64)
     const base64Data = Buffer.from(arrayBuffer).toString('base64');
     const contentType = response.headers.get('content-type') || 'video/mp4';
 
-    console.log('[resolver:fetchVideoFile] Successfully fetched small video', {
+    console.log('[resolver:fetchVideoFile] Successfully fetched SMALL video for inline playback', {
       contentType,
       contentLength,
       sizeInMB: (contentLength / (1024 * 1024)).toFixed(2)
@@ -1374,7 +1391,7 @@ resolver.define('getSignedVideoUrl', async ({ payload }) => {
 // Fetch a single chunk of video using HTTP Range request
 // This allows downloading large files in chunks, bypassing Forge's 6MB payload limit
 resolver.define('fetchVideoChunk', async ({ payload }) => {
-  const { videoUrl, startByte, endByte } = payload ?? {};
+  const { videoUrl, startByte, endByte } = payload || {};
 
   if (!videoUrl) {
     return {
@@ -1730,22 +1747,21 @@ const fetchUserByAccountId = async (accountId, useAsApp = false) => {
     console.log('[fetchUserByAccountId] Fetching user info for accountId:', accountId);
     const apiCall = useAsApp ? api.asApp() : api.asUser();
     
-    // Try Confluence API v2 first (accountId in path)
+    // Prefer Confluence REST API v1 with accountId query parameter
+    // GET /wiki/rest/api/user?accountId={accountId}
     let userResponse = await apiCall.requestConfluence(
-      route`/wiki/api/v2/users/${accountId}`
+      route`/wiki/rest/api/user?accountId=${accountId}`
     );
     
-    // If v2 API fails, try REST API v1 with query parameter
+    // If v1 API fails, try Confluence API v2 (accountId in path)
     if (!userResponse.ok) {
-      console.log('[fetchUserByAccountId] v2 API failed, trying REST API v1 with query parameter...');
+      console.log('[fetchUserByAccountId] REST API v1 failed, trying API v2 /users/{accountId}...');
       try {
-        // REST API v1 uses query parameter: /wiki/rest/api/user?accountId={accountId}
-        // Include query parameter directly in route template (same pattern as other endpoints)
         userResponse = await apiCall.requestConfluence(
-          route`/wiki/rest/api/user?accountId=${accountId}`
+          route`/wiki/api/v2/users/${accountId}`
         );
-      } catch (v1Error) {
-        console.warn('[fetchUserByAccountId] REST API v1 also failed:', v1Error?.message);
+      } catch (v2Error) {
+        console.warn('[fetchUserByAccountId] API v2 also failed:', v2Error?.message);
         // Keep the original response for error handling
       }
     }
@@ -1825,12 +1841,28 @@ const buildCommentBodyHtml = async (videoUrl, requestedBy, useAsApp = false) => 
   generatedBy = generatedBy || 'User';
   console.log('[buildCommentBodyHtml] Final generatedBy (displayName):', generatedBy);
 
-  // Build user mention - use "Generated by" format to match friend's code
-  // Position: BELOW the link (can be changed to ABOVE by swapping return statement)
-  // Escape username for HTML safety
-  const escapedUsername = String(generatedBy).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const requestedByHtml = `<p style="margin-top: 12px; margin-bottom: 0;"><strong>Generated by:</strong> ${escapedUsername}</p>`;
-  console.log('[buildCommentBodyHtml] Generated comment with username:', requestedByHtml);
+  // Build "Generated by" markup.
+  // Prefer a Confluence user mention when we have accountId, so Confluence resolves the actual name.
+  let requestedByHtml;
+  if (requestedBy?.accountId) {
+    const safeAccountId = String(requestedBy.accountId).replace(/"/g, '&quot;');
+    requestedByHtml =
+      `<p style="margin-top: 12px; margin-bottom: 0;">` +
+      `<strong>Generated by:</strong> ` +
+      `<ac:link><ri:user ri:account-id="${safeAccountId}" /></ac:link>` +
+      `</p>`;
+    console.log('[buildCommentBodyHtml] Generated comment with user mention for accountId:', safeAccountId);
+  } else {
+    // Escape username for HTML safety
+    const escapedUsername = String(generatedBy)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    requestedByHtml =
+      `<p style="margin-top: 12px; margin-bottom: 0;">` +
+      `<strong>Generated by:</strong> ${escapedUsername}</p>`;
+    console.log('[buildCommentBodyHtml] Generated comment with plain username:', requestedByHtml);
+  }
 
   const finalHtml = `<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>${requestedByHtml}`;
   console.log('[buildCommentBodyHtml] Final HTML:', finalHtml);

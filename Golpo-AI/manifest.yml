@@ -34,10 +34,7 @@ modules:
         - allow-popups
         - allow-popups-to-escape-sandbox
 
-  confluence:contentBylineItem:
-    - key: golpo-ai-byline-item
-      title: Golpo AI
-      resource: main
+ 
 
   function:
     - key: resolver
@@ -69,6 +66,7 @@ permissions:
     - read:comment:confluence
     - write:comment:confluence
     - read:confluence-user
+    - write:confluence-file
     - storage:app
   external:
     fetch:
