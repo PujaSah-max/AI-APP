@@ -648,6 +648,7 @@ function App() {
   const [videoOrientation, setVideoOrientation] = useState("portrait"); // "landscape" or "portrait"
   const [isLoadingVideo, setIsLoadingVideo] = useState(false); // Loading state for "Go to Video" button
   const [isVideoTooLarge, setIsVideoTooLarge] = useState(false); // Track if video is too large to play in modal
+  const [currentUser, setCurrentUser] = useState(null); // Current Confluence user info for attribution
   const [showVideoPlayerModal, setShowVideoPlayerModal] = useState(false); // Whether to show video player modal
 
   const maxChars = 500;
@@ -714,6 +715,37 @@ function App() {
   const videoElementRef = useRef(null);
   const fullscreenVideoRef = useRef(null);
   const [isFullscreenVideo, setIsFullscreenVideo] = useState(false);
+
+  // Fetch current Confluence user info for attribution (runs as the user via bridge)
+  useEffect(() => {
+    const fetchCurrentUser = async () => {
+      try {
+        console.log("[GolpoAI] Fetching current user info via requestConfluence...");
+        // Prefer REST API v1 current user endpoint
+        const response = await requestConfluence("/wiki/rest/api/user/current", {
+          headers: { Accept: "application/json" },
+        });
+        if (!response || !response.ok) {
+          console.warn("[GolpoAI] Failed to fetch current user via /wiki/rest/api/user/current. Status:", response?.status);
+          return;
+        }
+        const me = await response.json();
+        const normalized = {
+          accountId: me.accountId || me.userKey || me.key || null,
+          displayName: me.displayName || me.publicName || me.name || null,
+          publicName: me.publicName || me.displayName || null,
+          name: me.name || me.displayName || null,
+          username: me.username || null,
+          email: me.email || me.emailAddress || null,
+        };
+        console.log("[GolpoAI] Current user info captured:", normalized);
+        setCurrentUser(normalized);
+      } catch (err) {
+        console.warn("[GolpoAI] Error fetching current user info via requestConfluence:", err);
+      }
+    };
+    fetchCurrentUser();
+  }, []);
   
   // Function to clear the completion check interval
   const clearCompletionCheckInterval = useCallback(() => {
@@ -3527,6 +3559,7 @@ function App() {
         document: golpoAIDocument,
         videoSpecs: videoSpecs,
         description: description,
+        requestedBy: currentUser || null,
       });
 
       console.log("[GolpoAI] handleGenerateVideo: Video generation response received");

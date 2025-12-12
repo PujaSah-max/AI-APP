@@ -545,7 +545,7 @@ Generate only the script text, with no markdown formatting or additional comment
 // Generate video using Golpo AI API
 resolver.define('generateVideo', async ({ payload }) => {
   try {
-  const { document, videoSpecs, description } = payload ?? {};
+  const { document, videoSpecs, description, requestedBy: requestedByFromUi } = payload ?? {};
 
   if (!document) {
     throw new Error('Document is required to generate video.');
@@ -850,77 +850,84 @@ resolver.define('generateVideo', async ({ payload }) => {
     // If we have a jobId and pageId, store job info in Forge storage for background polling
     if (jobId && pageId) {
       try {
-        // Fetch complete user data using Confluence API endpoint and store basic info with the job
-        let requestedBy = null;
+        // Prefer requestedBy passed from UI (already running as the user)
+        let requestedBy = requestedByFromUi || null;
         try {
-          console.log('[resolver:generateVideo] Fetching current user data from Confluence API...');
-          
-          // Prefer Confluence API v2: GET /wiki/api/v2/users/me
-          let meResponse = await api.asUser().requestConfluence(
-            route`/wiki/api/v2/users/me`
-          );
-          
-          // Fallback to REST API v1: GET /wiki/rest/api/user/current
-          if (!meResponse.ok) {
-            console.warn('[resolver:generateVideo] /wiki/api/v2/users/me failed, trying /wiki/rest/api/user/current...');
-            try {
-              meResponse = await api.asUser().requestConfluence(
-                route`/wiki/rest/api/user/current`
-              );
-            } catch (v1Error) {
-              console.warn('[resolver:generateVideo] /wiki/rest/api/user/current also failed:', v1Error?.message);
-            }
+          if (requestedBy) {
+            console.log('[resolver:generateVideo] Using requestedBy from UI payload:', requestedBy);
+          } else {
+            console.log('[resolver:generateVideo] requestedBy not provided by UI, fetching current user data from Confluence API...');
           }
           
-          if (meResponse && meResponse.ok) {
-            const me = await meResponse.json();
-            console.log('[resolver:generateVideo] User data received:', JSON.stringify(me, null, 2));
+          // If not provided by UI, fall back to Confluence API lookups
+          if (!requestedBy) {
+            // Prefer Confluence API v2: GET /wiki/api/v2/users/me
+            let meResponse = await api.asUser().requestConfluence(
+              route`/wiki/api/v2/users/me`
+            );
             
-            // Normalise current user into requestedBy object
-            requestedBy = {
-              accountId: me.accountId || me.userKey || me.key || null,
-              displayName: me.displayName || me.publicName || me.name || null,
-              publicName: me.publicName || me.displayName || null,
-              name: me.name || me.displayName || null,
-              username: me.username || null,
-              email: me.email || me.emailAddress || null,
-              profilePicture:
-                me.profilePicture?.path ||
-                me.profilePicture?.href ||
-                me.avatarUrls?.['48x48'] ||
-                me.avatarUrls?.['32x32'] ||
-                me.avatarUrls?.['24x24'] ||
-                me.avatarUrls?.['16x16'] ||
-                null,
-              type: me.type || me.userType || null,
-            };
-            
-            // Store user info separately in Forge storage for future reference (optional)
-            if (requestedBy.accountId) {
-              const userStorageKey = `user-info-${requestedBy.accountId}`;
+            // Fallback to REST API v1: GET /wiki/rest/api/user/current
+            if (!meResponse.ok) {
+              console.warn('[resolver:generateVideo] /wiki/api/v2/users/me failed, trying /wiki/rest/api/user/current...');
               try {
-                await storage.set(userStorageKey, {
-                  ...requestedBy,
-                  lastUpdated: new Date().toISOString(),
-                });
-                console.log('[resolver:generateVideo] ✅ Stored user info in Forge storage:', userStorageKey);
-              } catch (userStorageError) {
-                console.warn('[resolver:generateVideo] Failed to store user info separately:', userStorageError);
-                // Continue even if separate storage fails
+                meResponse = await api.asUser().requestConfluence(
+                  route`/wiki/rest/api/user/current`
+                );
+              } catch (v1Error) {
+                console.warn('[resolver:generateVideo] /wiki/rest/api/user/current also failed:', v1Error?.message);
               }
             }
             
-            console.log('[resolver:generateVideo] ✅ User data captured and ready to store with job:', {
-              accountId: requestedBy.accountId,
-              displayName: requestedBy.displayName,
-            });
-          } else {
-            const errorText = meResponse ? await meResponse.text() : 'No response';
-            console.warn('[resolver:generateVideo] Failed to fetch current user info for job metadata (both endpoints):', {
-              status: meResponse?.status || 'unknown',
-              statusText: meResponse?.statusText || 'unknown',
-              error: errorText,
-            });
+            if (!requestedBy && meResponse && meResponse.ok) {
+              const me = await meResponse.json();
+              console.log('[resolver:generateVideo] User data received:', JSON.stringify(me, null, 2));
+              
+              // Normalise current user into requestedBy object
+              requestedBy = {
+                accountId: me.accountId || me.userKey || me.key || null,
+                displayName: me.displayName || me.publicName || me.name || null,
+                publicName: me.publicName || me.displayName || null,
+                name: me.name || me.displayName || null,
+                username: me.username || null,
+                email: me.email || me.emailAddress || null,
+                profilePicture:
+                  me.profilePicture?.path ||
+                  me.profilePicture?.href ||
+                  me.avatarUrls?.['48x48'] ||
+                  me.avatarUrls?.['32x32'] ||
+                  me.avatarUrls?.['24x24'] ||
+                  me.avatarUrls?.['16x16'] ||
+                  null,
+                type: me.type || me.userType || null,
+              };
+              
+              // Store user info separately in Forge storage for future reference (optional)
+              if (requestedBy.accountId) {
+                const userStorageKey = `user-info-${requestedBy.accountId}`;
+                try {
+                  await storage.set(userStorageKey, {
+                    ...requestedBy,
+                    lastUpdated: new Date().toISOString(),
+                  });
+                  console.log('[resolver:generateVideo] ✅ Stored user info in Forge storage:', userStorageKey);
+                } catch (userStorageError) {
+                  console.warn('[resolver:generateVideo] Failed to store user info separately:', userStorageError);
+                  // Continue even if separate storage fails
+                }
+              }
+              
+              console.log('[resolver:generateVideo] ✅ User data captured and ready to store with job:', {
+                accountId: requestedBy.accountId,
+                displayName: requestedBy.displayName,
+              });
+            } else {
+              const errorText = meResponse ? await meResponse.text() : 'No response';
+              console.warn('[resolver:generateVideo] Failed to fetch current user info for job metadata (both endpoints):', {
+                status: meResponse?.status || 'unknown',
+                statusText: meResponse?.statusText || 'unknown',
+                error: errorText,
+              });
+            }
           }
         } catch (userError) {
           console.warn('[resolver:generateVideo] Error fetching current user info for job metadata:', {
@@ -1803,72 +1810,16 @@ const fetchUserByAccountId = async (accountId, useAsApp = false) => {
 };
 
 // Helper function to build comment HTML for video URL
-// Optionally includes the user who requested the video (from job metadata)
-// Always fetches username from accountId when available to ensure we have the actual user name
+// Confluence footer comment: just the video link, no "Generated by" line
 const buildCommentBodyHtml = async (videoUrl, requestedBy, useAsApp = false) => {
-  console.log('[buildCommentBodyHtml] Input:', { videoUrl, requestedBy: JSON.stringify(requestedBy, null, 2), useAsApp });
-  
-  let generatedBy = null;
-  
-  // First, try to use displayName from stored requestedBy object (captured when job was created)
-  // This is the most reliable since it was fetched with user context
-  if (requestedBy?.displayName) {
-    generatedBy = requestedBy.displayName;
-    console.log('[buildCommentBodyHtml] ✅ Using displayName from stored requestedBy:', generatedBy);
-  } else if (requestedBy?.publicName) {
-    generatedBy = requestedBy.publicName;
-    console.log('[buildCommentBodyHtml] ✅ Using publicName from stored requestedBy:', generatedBy);
-  } else if (requestedBy?.name) {
-    generatedBy = requestedBy.name;
-    console.log('[buildCommentBodyHtml] ✅ Using name from stored requestedBy:', generatedBy);
-  }
-  
-  // If we don't have a name yet, try to fetch from accountId (fallback for old jobs or missing data)
-  if (!generatedBy && requestedBy?.accountId) {
-    console.log('[buildCommentBodyHtml] No displayName in stored data, fetching user info from accountId:', requestedBy.accountId);
-    try {
-      const fetchedUser = await fetchUserByAccountId(requestedBy.accountId, useAsApp);
-      if (fetchedUser) {
-        generatedBy = fetchedUser.displayName || fetchedUser.publicName || fetchedUser.name || null;
-        console.log('[buildCommentBodyHtml] ✅ Fetched displayName from API:', generatedBy);
-      }
-    } catch (fetchError) {
-      console.warn('[buildCommentBodyHtml] Failed to fetch user from accountId:', fetchError?.message);
-    }
-  }
-  
-  // Final fallback to 'User' if still no name found (same as friend's pattern: jobData.generatedBy?.displayName || 'User')
-  generatedBy = generatedBy || 'User';
-  console.log('[buildCommentBodyHtml] Final generatedBy (displayName):', generatedBy);
+  console.log('[buildCommentBodyHtml] Input (link only, no attribution):', {
+    videoUrl,
+    requestedBy: requestedBy ? JSON.stringify(requestedBy, null, 2) : 'null',
+    useAsApp,
+  });
 
-  // Build "Generated by" markup.
-  // Prefer a Confluence user mention when we have accountId, so Confluence resolves the actual name.
-  let requestedByHtml;
-  if (requestedBy?.accountId) {
-    const safeAccountId = String(requestedBy.accountId).replace(/"/g, '&quot;');
-    requestedByHtml =
-      `<p style="margin-top: 12px; margin-bottom: 0;">` +
-      `<strong>Generated by:</strong> ` +
-      `<ac:link><ri:user ri:account-id="${safeAccountId}" /></ac:link>` +
-      `</p>`;
-    console.log('[buildCommentBodyHtml] Generated comment with user mention for accountId:', safeAccountId);
-  } else {
-    // Escape username for HTML safety
-    const escapedUsername = String(generatedBy)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-    requestedByHtml =
-      `<p style="margin-top: 12px; margin-bottom: 0;">` +
-      `<strong>Generated by:</strong> ${escapedUsername}</p>`;
-    console.log('[buildCommentBodyHtml] Generated comment with plain username:', requestedByHtml);
-  }
-
-  const finalHtml = `<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>${requestedByHtml}`;
+  const finalHtml = `<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>`;
   console.log('[buildCommentBodyHtml] Final HTML:', finalHtml);
-  
-  // Show "Generated by" BELOW the link (default)
-  // To show ABOVE the link, change to: return `${requestedByHtml}<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>`;
   return finalHtml;
 };
 
