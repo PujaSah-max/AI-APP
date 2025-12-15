@@ -647,6 +647,15 @@ function App() {
   const [showVideoExistsModal, setShowVideoExistsModal] = useState(false);
   const [videoOrientation, setVideoOrientation] = useState("portrait"); // "landscape" or "portrait"
   const [isLoadingVideo, setIsLoadingVideo] = useState(false); // Loading state for "Go to Video" button
+  
+  // API Key Configuration State
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [apiKey, setApiKey] = useState("");
+  const [apiKeyMasked, setApiKeyMasked] = useState(null);
+  const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
+  const [isEditingApiKey, setIsEditingApiKey] = useState(false);
+  const [isLoadingApiKey, setIsLoadingApiKey] = useState(false);
+  const [isSavingApiKey, setIsSavingApiKey] = useState(false);
   const [isVideoTooLarge, setIsVideoTooLarge] = useState(false); // Track if video is too large to play in modal
   const [currentUser, setCurrentUser] = useState(null); // Current Confluence user info for attribution
   const [showVideoPlayerModal, setShowVideoPlayerModal] = useState(false); // Whether to show video player modal
@@ -746,6 +755,123 @@ function App() {
     };
     fetchCurrentUser();
   }, []);
+
+  // Fetch user's API key on component mount
+  useEffect(() => {
+    const fetchApiKey = async () => {
+      if (!currentUser?.accountId) {
+        // Wait for user info to be loaded
+        return;
+      }
+      try {
+        setIsLoadingApiKey(true);
+        const result = await invoke("getUserApiKey", { accountId: currentUser.accountId });
+        if (result) {
+          const { hasKey, maskedKey } = result;
+          setApiKeyConfigured(!!hasKey);
+          setApiKeyMasked(maskedKey || null);
+        }
+      } catch (err) {
+        console.warn("[GolpoAI] Error fetching API key:", err);
+      } finally {
+        setIsLoadingApiKey(false);
+      }
+    };
+    fetchApiKey();
+  }, [currentUser?.accountId]);
+
+  // Handler to open API key settings modal
+  const handleOpenApiKeyModal = useCallback(async () => {
+    if (!currentUser?.accountId) {
+      setError("Unable to identify current user. Please refresh the page.");
+      return;
+    }
+    try {
+      setIsLoadingApiKey(true);
+      const result = await invoke("getUserApiKey", { accountId: currentUser.accountId });
+      if (result) {
+        const { hasKey, maskedKey } = result;
+        setApiKeyConfigured(!!hasKey);
+        setIsEditingApiKey(false);
+        setApiKeyMasked(maskedKey || null);
+        setApiKey(""); // Clear input field
+      }
+      setShowApiKeyModal(true);
+    } catch (err) {
+      console.error("[GolpoAI] Error fetching API key:", err);
+      setError(err?.message || "Failed to load API key configuration");
+    } finally {
+      setIsLoadingApiKey(false);
+    }
+  }, [currentUser?.accountId]);
+
+  // Handler to save API key
+  const handleSaveApiKey = useCallback(async () => {
+    if (!apiKey || apiKey.trim() === "") {
+      setError("Please enter an API key");
+      return;
+    }
+
+    if (!currentUser?.accountId) {
+      setError("Unable to identify current user. Please refresh the page.");
+      return;
+    }
+
+    try {
+      setIsSavingApiKey(true);
+      setError("");
+      const result = await invoke("setUserApiKey", { 
+        apiKey: apiKey.trim(),
+        accountId: currentUser.accountId 
+      });
+      if (result && result.success) {
+        setApiKeyConfigured(true);
+        setIsEditingApiKey(false);
+        setApiKeyMasked(result.maskedKey || null);
+        setApiKey(""); // Clear input
+        setShowApiKeyModal(false);
+      } else {
+        setError("Failed to save API key");
+      }
+      if (result && result.success) {
+        setApiKeyConfigured(true);
+        setIsEditingApiKey(false);
+        setApiKeyMasked(result.maskedKey || null);
+        setApiKey(""); // Clear input
+        setShowApiKeyModal(false);
+      } else {
+        setError("Failed to save API key");
+      }
+    } catch (err) {
+      console.error("[GolpoAI] Error saving API key:", err);
+      const rawMessage = err?.message || "";
+
+      // If backend reported invalid API key, show only the friendly message
+      const friendlyInvalidMsg = "Invalid API key. Please check your API key and try again.";
+      if (rawMessage.includes("Invalid API key")) {
+        setError(friendlyInvalidMsg);
+      } else {
+        setError(rawMessage || "Failed to save API key");
+      }
+    } finally {
+      setIsSavingApiKey(false);
+    }
+  }, [apiKey, currentUser?.accountId]);
+
+  // Primary button click handler for API key modal
+  const handleApiKeyPrimaryClick = useCallback(async () => {
+    // If a key is already configured and we're not yet editing,
+    // first click simply switches to "edit" mode (clears input and changes label to Save).
+    if (apiKeyConfigured && !isEditingApiKey) {
+      setIsEditingApiKey(true);
+      setApiKey("");
+      setError("");
+      return;
+    }
+
+    // Otherwise, perform save
+    await handleSaveApiKey();
+  }, [apiKeyConfigured, isEditingApiKey, handleSaveApiKey]);
   
   // Function to clear the completion check interval
   const clearCompletionCheckInterval = useCallback(() => {
@@ -3560,6 +3686,8 @@ function App() {
         videoSpecs: videoSpecs,
         description: description,
         requestedBy: currentUser || null,
+        // Pass accountId explicitly so backend can load the correct per-user API key
+        accountId: currentUser?.accountId || null,
       });
 
       console.log("[GolpoAI] handleGenerateVideo: Video generation response received");
@@ -3940,9 +4068,71 @@ function App() {
         {/* Header */}
         <header style={currentStyles.heroContainer}>
           <section style={currentStyles.heroCard}>
-            <div style={currentStyles.heroContent}>
-              <img src={golpoIcon} style={currentStyles.logo} alt="Golpo AI" />
-              <h1 style={currentStyles.heroTitle}>{APP_TITLE}</h1>
+            <div style={{ ...currentStyles.heroContent, justifyContent: "space-between", width: "100%" }}>
+              <div style={currentStyles.heroContent}>
+                <img src={golpoIcon} style={currentStyles.logo} alt="Golpo AI" />
+                <h1 style={currentStyles.heroTitle}>{APP_TITLE}</h1>
+              </div>
+              <button
+                onClick={handleOpenApiKeyModal}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  padding: "8px 18px",
+                  borderRadius: "999px",
+                  border: "1px solid rgba(148, 163, 184, 0.35)",
+                  background: "linear-gradient(135deg, #fff7f5, #fef3ff)",
+                  color: "#0f172a",
+                  fontSize: "14px",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  transition: "all 0.2s",
+                  whiteSpace: "nowrap",
+                  boxShadow: "0 2px 6px rgba(15, 23, 42, 0.08)",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.boxShadow = "0 3px 8px rgba(15, 23, 42, 0.16)";
+                  e.currentTarget.style.transform = "translateY(-1px)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.boxShadow = "0 2px 6px rgba(15, 23, 42, 0.08)";
+                  e.currentTarget.style.transform = "translateY(0)";
+                }}
+              >
+                <span
+                  aria-hidden
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: "999px",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background: "rgba(148, 163, 184, 0.16)",
+                  }}
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="M12 15.5C13.933 15.5 15.5 13.933 15.5 12C15.5 10.067 13.933 8.5 12 8.5C10.067 8.5 8.5 10.067 8.5 12C8.5 13.933 10.067 15.5 12 15.5Z"
+                      stroke="#64748B"
+                      strokeWidth="1.6"
+                    />
+                    <path
+                      d="M4.75 12.0001C4.75 11.6301 4.78 11.2701 4.84 10.9201L3.11 9.64006C2.93 9.50006 2.88 9.25006 2.99 9.05006L4.39 6.61006C4.5 6.41006 4.74 6.33006 4.95 6.39006L7.12 7.03006C7.57 6.69006 8.06 6.40006 8.59 6.17006L8.93 3.93006C8.96 3.71006 9.15 3.55006 9.38 3.55006H12.62C12.85 3.55006 13.04 3.71006 13.07 3.93006L13.41 6.17006C13.94 6.40006 14.43 6.69006 14.88 7.03006L17.05 6.39006C17.26 6.33006 17.5 6.41006 17.61 6.61006L19.01 9.05006C19.12 9.25006 19.07 9.50006 18.89 9.64006L17.16 10.9201C17.22 11.2701 17.25 11.6301 17.25 12.0001C17.25 12.3701 17.22 12.7301 17.16 13.0801L18.89 14.3601C19.07 14.5001 19.12 14.7501 19.01 14.9501L17.61 17.3901C17.5 17.5901 17.26 17.6701 17.05 17.6101L14.88 16.9701C14.43 17.3101 13.94 17.6001 13.41 17.8301L13.07 20.0701C13.04 20.2901 12.85 20.4501 12.62 20.4501H9.38C9.15 20.4501 8.96 20.2901 8.93 20.0701L8.59 17.8301C8.06 17.6001 7.57 17.3101 7.12 16.9701L4.95 17.6101C4.74 17.6701 4.5 17.5901 4.39 17.3901L2.99 14.9501C2.88 14.7501 2.93 14.5001 3.11 14.3601L4.84 13.0801C4.78 12.7301 4.75 12.3701 4.75 12.0001Z"
+                      stroke="#A855F7"
+                      strokeWidth="1.6"
+                    />
+                  </svg>
+                </span>
+                <span>Settings</span>
+              </button>
             </div>
           </section>
         </header>
@@ -4565,6 +4755,123 @@ function App() {
                   OK
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* API Key Configuration Modal */}
+      {showApiKeyModal && (
+        <div style={styles.modalOverlay}>
+          <div style={styles.modal}>
+            {/* Modal Header */}
+            <div style={styles.modalHeader}>
+              <div>
+                <h3 style={styles.modalTitle}>Configure Golpo AI API Key</h3>
+                <p style={{ margin: "8px 0 0 0", fontSize: "14px", color: "#64748b" }}>
+                  Enter your Golpo AI API key to generate videos. Your API key is stored securely and is only accessible by you.
+                </p>
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div style={styles.modalForm}>
+              <div style={styles.formField}>
+                <label style={styles.formLabel}>API Key</label>
+                <input
+                  type="text"
+                  style={styles.formInput}
+                  placeholder="Enter your Golpo AI API key"
+                  value={
+                    isEditingApiKey
+                      ? apiKey
+                      : apiKey || (apiKeyMasked && !apiKey ? apiKeyMasked : "")
+                  }
+                  onChange={(e) => {
+                    setApiKey(e.target.value);
+                    // Hide the \"API key configured\" message while user is editing
+                    if (apiKeyConfigured) {
+                      setApiKeyConfigured(false);
+                    }
+                  }}
+                  disabled={isSavingApiKey}
+                  onFocus={(e) => {
+                    // Clear the masked key only when not already in edit mode
+                    if (!isEditingApiKey && apiKeyMasked && !apiKey) {
+                      setApiKey("");
+                      e.target.value = "";
+                    }
+                  }}
+                />
+                {apiKeyMasked && apiKeyConfigured && (
+                  <p style={{ margin: "8px 0 0 0", fontSize: "13px", color: "#64748b" }}>
+                    Click "Update API Key" to replace the existing key.
+                  </p>
+                )}
+              </div>
+
+              {/* Status Message */}
+              {apiKeyConfigured && apiKeyMasked && (
+                <div style={{
+                  marginTop: "16px",
+                  padding: "12px 16px",
+                  borderRadius: "8px",
+                  background: "#F0FDF4",
+                  border: "1px solid #86EFAC",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  fontSize: "14px",
+                  color: "#166534"
+                }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M20 6L9 17l-5-5" />
+                  </svg>
+                  <span> API key configured</span>
+                </div>
+              )}
+
+              {/* Error Display */}
+              {error && (
+                <div style={{ marginTop: "16px", padding: "12px", background: "#FEE2E2", borderRadius: "8px", color: "#DC2626", fontSize: "14px" }}>
+                  {error}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div style={styles.modalFooter}>
+              <button
+                style={styles.modalCancelButton}
+                onClick={() => {
+                  setShowApiKeyModal(false);
+                  setApiKey("");
+                  setIsEditingApiKey(false);
+                  setError("");
+                }}
+                disabled={isSavingApiKey}
+              >
+                Cancel
+              </button>
+              <button
+                style={{
+                  ...styles.modalGenerateButton,
+                  ...(isSavingApiKey ? styles.modalGenerateButtonDisabled : {}),
+                  background: "#DC2626",
+                }}
+                onClick={handleApiKeyPrimaryClick}
+                disabled={
+                  isSavingApiKey ||
+                  // When no key exists OR we're editing, require non-empty input
+                  ((!apiKeyConfigured || isEditingApiKey) && !apiKey.trim())
+                }
+              >
+                {isSavingApiKey
+                  ? "Saving..."
+                  : apiKeyConfigured && !isEditingApiKey
+                    ? "Update API Key"
+                    : "Save API Key"}
+              </button>
             </div>
           </div>
         </div>
@@ -5253,6 +5560,18 @@ const styles = {
     color: "#64748b",
     marginTop: 6,
     marginBottom: 0,
+  },
+  formInput: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 8,
+    border: "1px solid #e2e8f0",
+    background: "#fff",
+    fontSize: 14,
+    color: "#1e293b",
+    fontFamily: "inherit",
+    outline: "none",
+    transition: "border-color 0.2s",
   },
   formSelect: {
     width: "100%",
