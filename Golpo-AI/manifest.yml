@@ -34,7 +34,13 @@ modules:
         - allow-popups
         - allow-popups-to-escape-sandbox
 
- 
+  confluence:globalPage:
+    - key: golpo-ai-getting-started
+      title: Golpo AI - Getting Started
+      route: getting-started
+      resource: global-page
+      resolver:
+        function: resolver
 
   function:
     - key: resolver
@@ -50,6 +56,8 @@ modules:
 resources:
   - key: main
     path: static/hello-world/build
+  - key: global-page
+    path: static/global-page/build
 
 app:
   runtime:

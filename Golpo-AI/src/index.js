@@ -315,43 +315,55 @@ resolver.define('getPageById', async ({ payload }) => {
   }
 });
 
-// Get user's Golpo API key from storage
-resolver.define('getUserApiKey', async ({ context, payload }) => {
+// Helper function to check if current user is a Confluence admin
+const checkAdminAccess = async () => {
   try {
-    // Get account ID from payload (preferred) or try to fetch from API
-    let accountId = payload?.accountId || null;
+    const response = await api.asUser().requestConfluence(
+      route`/wiki/rest/api/user/current?expand=operations`
+    );
     
-    // If not provided in payload, try to get from API
-    if (!accountId) {
-      try {
-        const meResponse = await api.asUser().requestConfluence(
-          route`/wiki/api/v2/users/me`
-        );
-        
-        if (!meResponse.ok) {
-          // Fallback to REST API v1
-          const meResponseV1 = await api.asUser().requestConfluence(
-            route`/wiki/rest/api/user/current`
-          );
-          if (meResponseV1.ok) {
-            const me = await meResponseV1.json();
-            accountId = me.accountId || me.userKey || me.key;
-          }
-        } else {
-          const me = await meResponse.json();
-          accountId = me.accountId || me.userKey || me.key;
-        }
-      } catch (userError) {
-        console.warn('[resolver:getUserApiKey] Failed to fetch current user:', userError);
-      }
+    if (!response.ok) {
+      console.warn('[checkAdminAccess] Failed to fetch user operations:', response.status, response.statusText);
+      return false;
     }
+    
+    const userData = await response.json();
+    const operations = userData.operations || [];
+    
+    // Check for admin operation on application
+    const isAdmin = operations.some(op => 
+      op.operation === 'administer' && op.targetType === 'application'
+    );
+    
+    return isAdmin;
+  } catch (error) {
+    console.error('[checkAdminAccess] Error checking admin access:', error);
+    return false;
+  }
+};
 
-    if (!accountId) {
-      throw new Error('Unable to identify current user. Please ensure you are logged in.');
+// Check if user is Confluence admin
+resolver.define('checkAdminAccess', async () => {
+  try {
+    const isAdmin = await checkAdminAccess();
+    return { isAdmin };
+  } catch (error) {
+    console.error('[resolver:checkAdminAccess] Error:', error);
+    return { isAdmin: false };
+  }
+});
+
+// Get admin API key (only accessible to admins, returns masked key)
+resolver.define('getAdminApiKey', async () => {
+  try {
+    // First, verify admin access
+    const isAdmin = await checkAdminAccess();
+    if (!isAdmin) {
+      throw new Error('Unauthorized: Admin access required');
     }
-
-    // Get API key from storage using user-specific key
-    const storageKey = `golpo-api-key-${accountId}`;
+    
+    // Get admin API key from storage (stored at app level, not user level)
+    const storageKey = 'golpo-admin-api-key';
     const storedKey = await storage.get(storageKey);
     
     if (storedKey && storedKey.apiKey) {
@@ -363,35 +375,38 @@ resolver.define('getUserApiKey', async ({ context, payload }) => {
       
       return {
         hasKey: true,
-        maskedKey: maskedKey,
-        // Return full key for backend use (will be used internally)
-        apiKey: apiKey
+        maskedKey: maskedKey
       };
     }
-
+    
     return {
       hasKey: false,
-      maskedKey: null,
-      apiKey: null
+      maskedKey: null
     };
   } catch (error) {
-    console.error('[resolver:getUserApiKey] Error:', error);
-    throw new Error(`Failed to get user API key: ${error?.message || 'Unknown error'}`);
+    console.error('[resolver:getAdminApiKey] Error:', error);
+    throw new Error(`Failed to get admin API key: ${error?.message || 'Unknown error'}`);
   }
 });
 
-// Set user's Golpo API key in storage
-resolver.define('setUserApiKey', async ({ context, payload }) => {
+// Set admin API key (only accessible to admins, with validation)
+resolver.define('setAdminApiKey', async ({ payload }) => {
   try {
-    const { apiKey, accountId: accountIdFromPayload } = payload ?? {};
+    // First, verify admin access
+    const isAdmin = await checkAdminAccess();
+    if (!isAdmin) {
+      throw new Error('Unauthorized: Admin access required');
+    }
+    
+    const { apiKey } = payload ?? {};
     
     if (!apiKey || typeof apiKey !== 'string' || apiKey.trim() === '') {
       throw new Error('API key is required');
     }
-
+    
     const trimmedApiKey = apiKey.trim();
-
-    // First, validate the API key with Golpo's credits endpoint
+    
+    // Validate the API key with Golpo's credits endpoint
     try {
       const validateResponse = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
         method: 'GET',
@@ -400,120 +415,57 @@ resolver.define('setUserApiKey', async ({ context, payload }) => {
           'x-api-key': trimmedApiKey,
         },
       });
-
+      
       if (!validateResponse.ok) {
-        // For invalid keys, always surface a simple, user-friendly message
-        // The frontend will display this directly in the modal
         throw new Error('Invalid API key. Please check your API key and try again.');
       }
-
-      console.log('[resolver:setUserApiKey] ✅ Golpo API key validated successfully via /users/credits');
+      
+      console.log('[resolver:setAdminApiKey] ✅ Golpo API key validated successfully via /users/credits');
     } catch (validationError) {
-      console.error('[resolver:setUserApiKey] Golpo API key validation failed:', validationError);
-      // Surface a clear, user-friendly message
+      console.error('[resolver:setAdminApiKey] Golpo API key validation failed:', validationError);
       throw new Error(validationError?.message || 'Failed to validate Golpo API key. Please check the key and try again.');
     }
-
-    // Get account ID from payload (preferred) or try to fetch from API
-    let accountId = accountIdFromPayload || null;
     
-    // If not provided in payload, try to get from API
-    if (!accountId) {
-      try {
-        const meResponse = await api.asUser().requestConfluence(
-          route`/wiki/api/v2/users/me`
-        );
-        
-        if (!meResponse.ok) {
-          // Fallback to REST API v1
-          const meResponseV1 = await api.asUser().requestConfluence(
-            route`/wiki/rest/api/user/current`
-          );
-          if (meResponseV1.ok) {
-            const me = await meResponseV1.json();
-            accountId = me.accountId || me.userKey || me.key;
-          }
-        } else {
-          const me = await meResponse.json();
-          accountId = me.accountId || me.userKey || me.key;
-        }
-      } catch (userError) {
-        console.warn('[resolver:setUserApiKey] Failed to fetch current user:', userError);
-      }
-    }
-
-    if (!accountId) {
-      throw new Error('Unable to identify current user. Please ensure you are logged in.');
-    }
-
-    // Store API key in storage using user-specific key
-    const storageKey = `golpo-api-key-${accountId}`;
+    // Store API key in storage at app level (not user-specific)
+    const storageKey = 'golpo-admin-api-key';
     await storage.set(storageKey, {
       apiKey: trimmedApiKey,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      updatedBy: 'admin' // Could store accountId if needed
     });
-
+    
     // Return masked version for display
     const maskedKey = trimmedApiKey.length > 8 
       ? `${trimmedApiKey.substring(0, 4)}${'*'.repeat(Math.max(0, trimmedApiKey.length - 8))}${trimmedApiKey.substring(trimmedApiKey.length - 4)}`
       : '****';
-
+    
     return {
       success: true,
       maskedKey: maskedKey
     };
   } catch (error) {
-    console.error('[resolver:setUserApiKey] Error:', error);
-    throw new Error(`Failed to set user API key: ${error?.message || 'Unknown error'}`);
+    console.error('[resolver:setAdminApiKey] Error:', error);
+    throw new Error(`Failed to set admin API key: ${error?.message || 'Unknown error'}`);
   }
 });
 
-// Helper function to get user's API key (for internal use in other resolvers)
-const getUserApiKeyInternal = async (accountId = null) => {
+// Helper function to get admin API key (for internal use in other resolvers)
+// Only uses admin API key configured in global page
+const getUserApiKeyInternal = async () => {
   try {
-    // If accountId not provided, try to get current user
-    if (!accountId) {
-      try {
-        const meResponse = await api.asUser().requestConfluence(
-          route`/wiki/api/v2/users/me`
-        );
-        
-        if (!meResponse.ok) {
-          const meResponseV1 = await api.asUser().requestConfluence(
-            route`/wiki/rest/api/user/current`
-          );
-          if (meResponseV1.ok) {
-            const me = await meResponseV1.json();
-            accountId = me.accountId || me.userKey || me.key;
-          }
-        } else {
-          const me = await meResponse.json();
-          accountId = me.accountId || me.userKey || me.key;
-        }
-      } catch (userError) {
-        console.warn('[getUserApiKeyInternal] Failed to fetch current user:', userError);
-      }
-    }
-
-    if (!accountId) {
-      // Fallback to environment variable if user not found
-      return process.env.GOLPO_API_KEY || null;
-    }
-
-    // Get API key from storage
-    const storageKey = `golpo-api-key-${accountId}`;
-    const storedKey = await storage.get(storageKey);
+    // Get admin API key (configured in global page)
+    const adminStorageKey = 'golpo-admin-api-key';
+    const adminStoredKey = await storage.get(adminStorageKey);
     
-    if (storedKey && storedKey.apiKey) {
-      return storedKey.apiKey;
+    if (adminStoredKey && adminStoredKey.apiKey) {
+      console.log('[getUserApiKeyInternal] Using admin API key');
+      return adminStoredKey.apiKey;
     }
 
-    // Fallback to environment variable if user key not found
-    return process.env.GOLPO_API_KEY || null;
+    return null;
   } catch (error) {
-    console.warn('[getUserApiKeyInternal] Error getting user API key, falling back to env var:', error);
-    // Fallback to environment variable on error
-    return process.env.GOLPO_API_KEY || null;
+    console.warn('[getUserApiKeyInternal] Error getting admin API key:', error);
+    return null;
   }
 };
 
@@ -753,11 +705,11 @@ resolver.define('generateVideo', async ({ payload }) => {
     throw new Error('Document is required to generate video.');
   }
 
-  // Get API key from user storage (per-user configuration)
-  const API_KEY = await getUserApiKeyInternal(accountIdFromPayload || null);
+  // Get admin API key (configured in global page)
+  const API_KEY = await getUserApiKeyInternal();
 
   if (!API_KEY) {
-    throw new Error('Golpo API key is not configured. Please configure your API key in Settings.');
+    throw new Error('Golpo API key is not configured. Please contact your administrator to configure the API key in the Global Page Settings.');
   }
 
   // Build the prompt from the document
@@ -1213,11 +1165,11 @@ resolver.define('getVideoStatus', async ({ payload }) => {
     throw new Error('Job id is required to check video status.');
   }
 
-  // Get API key from user storage (per-user configuration)
+  // Get admin API key (configured in global page)
   const API_KEY = await getUserApiKeyInternal();
 
   if (!API_KEY) {
-    throw new Error('Golpo API key is not configured. Please configure your API key in Settings.');
+    throw new Error('Golpo API key is not configured. Please contact your administrator to configure the API key in the Global Page Settings.');
   }
 
   const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
@@ -2128,24 +2080,14 @@ resolver.define('pollVideoStatusBackground', async () => {
     const activeJobsKey = 'active-video-jobs';
     const activeJobs = await storage.get(activeJobsKey) || [];
     
-    // Get API key from user storage (per-user configuration)
+    // Get admin API key (configured in global page)
     // Note: For background polling, we need to get the API key from the job's requestedBy user
+    // Get admin API key (configured in global page)
     let API_KEY = null;
     try {
-      // Try to get API key from the first active job's user
-      if (activeJobs.length > 0) {
-        const firstJobKey = `video-job-${activeJobs[0]}`;
-        const firstJobData = await storage.get(firstJobKey);
-        if (firstJobData?.requestedBy?.accountId) {
-          API_KEY = await getUserApiKeyInternal(firstJobData.requestedBy.accountId);
-        }
-      }
-      // If still no key, try current user (for manual polling)
-      if (!API_KEY) {
-        API_KEY = await getUserApiKeyInternal();
-      }
+      API_KEY = await getUserApiKeyInternal();
     } catch (keyError) {
-      console.warn('[pollVideoStatusBackground] Error getting user API key:', keyError);
+      console.warn('[pollVideoStatusBackground] Error getting admin API key:', keyError);
     }
     
     if (!API_KEY) {
@@ -2385,24 +2327,14 @@ const pollVideoStatusBackgroundDirect = async () => {
     const activeJobsKey = 'active-video-jobs';
     const activeJobs = await storage.get(activeJobsKey) || [];
     
-    // Get API key from user storage (per-user configuration)
+    // Get admin API key (configured in global page)
     // Note: For background polling, we need to get the API key from the job's requestedBy user
+    // Get admin API key (configured in global page)
     let API_KEY = null;
     try {
-      // Try to get API key from the first active job's user
-      if (activeJobs.length > 0) {
-        const firstJobKey = `video-job-${activeJobs[0]}`;
-        const firstJobData = await storage.get(firstJobKey);
-        if (firstJobData?.requestedBy?.accountId) {
-          API_KEY = await getUserApiKeyInternal(firstJobData.requestedBy.accountId);
-        }
-      }
-      // If still no key, try current user (for manual polling)
-      if (!API_KEY) {
-        API_KEY = await getUserApiKeyInternal();
-      }
+      API_KEY = await getUserApiKeyInternal();
     } catch (keyError) {
-      console.warn('[pollVideoStatusBackground] Error getting user API key:', keyError);
+      console.warn('[pollVideoStatusBackground] Error getting admin API key:', keyError);
     }
     
     if (!API_KEY) {

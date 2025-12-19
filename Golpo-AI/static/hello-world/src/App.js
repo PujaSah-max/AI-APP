@@ -648,14 +648,7 @@ function App() {
   const [videoOrientation, setVideoOrientation] = useState("portrait"); // "landscape" or "portrait"
   const [isLoadingVideo, setIsLoadingVideo] = useState(false); // Loading state for "Go to Video" button
   
-  // API Key Configuration State
-  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
-  const [apiKey, setApiKey] = useState("");
-  const [apiKeyMasked, setApiKeyMasked] = useState(null);
-  const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
-  const [isEditingApiKey, setIsEditingApiKey] = useState(false);
-  const [isLoadingApiKey, setIsLoadingApiKey] = useState(false);
-  const [isSavingApiKey, setIsSavingApiKey] = useState(false);
+  // API Key Configuration State - Removed (using admin API key from global page)
   const [isVideoTooLarge, setIsVideoTooLarge] = useState(false); // Track if video is too large to play in modal
   const [currentUser, setCurrentUser] = useState(null); // Current Confluence user info for attribution
   const [showVideoPlayerModal, setShowVideoPlayerModal] = useState(false); // Whether to show video player modal
@@ -757,121 +750,7 @@ function App() {
   }, []);
 
   // Fetch user's API key on component mount
-  useEffect(() => {
-    const fetchApiKey = async () => {
-      if (!currentUser?.accountId) {
-        // Wait for user info to be loaded
-        return;
-      }
-      try {
-        setIsLoadingApiKey(true);
-        const result = await invoke("getUserApiKey", { accountId: currentUser.accountId });
-        if (result) {
-          const { hasKey, maskedKey } = result;
-          setApiKeyConfigured(!!hasKey);
-          setApiKeyMasked(maskedKey || null);
-        }
-      } catch (err) {
-        console.warn("[GolpoAI] Error fetching API key:", err);
-      } finally {
-        setIsLoadingApiKey(false);
-      }
-    };
-    fetchApiKey();
-  }, [currentUser?.accountId]);
-
-  // Handler to open API key settings modal
-  const handleOpenApiKeyModal = useCallback(async () => {
-    if (!currentUser?.accountId) {
-      setError("Unable to identify current user. Please refresh the page.");
-      return;
-    }
-    try {
-      setIsLoadingApiKey(true);
-      const result = await invoke("getUserApiKey", { accountId: currentUser.accountId });
-      if (result) {
-        const { hasKey, maskedKey } = result;
-        setApiKeyConfigured(!!hasKey);
-        setIsEditingApiKey(false);
-        setApiKeyMasked(maskedKey || null);
-        setApiKey(""); // Clear input field
-      }
-      setShowApiKeyModal(true);
-    } catch (err) {
-      console.error("[GolpoAI] Error fetching API key:", err);
-      setError(err?.message || "Failed to load API key configuration");
-    } finally {
-      setIsLoadingApiKey(false);
-    }
-  }, [currentUser?.accountId]);
-
-  // Handler to save API key
-  const handleSaveApiKey = useCallback(async () => {
-    if (!apiKey || apiKey.trim() === "") {
-      setError("Please enter an API key");
-      return;
-    }
-
-    if (!currentUser?.accountId) {
-      setError("Unable to identify current user. Please refresh the page.");
-      return;
-    }
-
-    try {
-      setIsSavingApiKey(true);
-      setError("");
-      const result = await invoke("setUserApiKey", { 
-        apiKey: apiKey.trim(),
-        accountId: currentUser.accountId 
-      });
-      if (result && result.success) {
-        setApiKeyConfigured(true);
-        setIsEditingApiKey(false);
-        setApiKeyMasked(result.maskedKey || null);
-        setApiKey(""); // Clear input
-        setShowApiKeyModal(false);
-      } else {
-        setError("Failed to save API key");
-      }
-      if (result && result.success) {
-        setApiKeyConfigured(true);
-        setIsEditingApiKey(false);
-        setApiKeyMasked(result.maskedKey || null);
-        setApiKey(""); // Clear input
-        setShowApiKeyModal(false);
-      } else {
-        setError("Failed to save API key");
-      }
-    } catch (err) {
-      console.error("[GolpoAI] Error saving API key:", err);
-      const rawMessage = err?.message || "";
-
-      // If backend reported invalid API key, show only the friendly message
-      const friendlyInvalidMsg = "Invalid API key. Please check your API key and try again.";
-      if (rawMessage.includes("Invalid API key")) {
-        setError(friendlyInvalidMsg);
-      } else {
-        setError(rawMessage || "Failed to save API key");
-      }
-    } finally {
-      setIsSavingApiKey(false);
-    }
-  }, [apiKey, currentUser?.accountId]);
-
-  // Primary button click handler for API key modal
-  const handleApiKeyPrimaryClick = useCallback(async () => {
-    // If a key is already configured and we're not yet editing,
-    // first click simply switches to "edit" mode (clears input and changes label to Save).
-    if (apiKeyConfigured && !isEditingApiKey) {
-      setIsEditingApiKey(true);
-      setApiKey("");
-      setError("");
-      return;
-    }
-
-    // Otherwise, perform save
-    await handleSaveApiKey();
-  }, [apiKeyConfigured, isEditingApiKey, handleSaveApiKey]);
+  // API key configuration removed - using admin API key from global page
   
   // Function to clear the completion check interval
   const clearCompletionCheckInterval = useCallback(() => {
@@ -4109,71 +3988,9 @@ function App() {
         {/* Header */}
         <header style={currentStyles.heroContainer}>
           <section style={currentStyles.heroCard}>
-            <div style={{ ...currentStyles.heroContent, justifyContent: "space-between", width: "100%" }}>
-              <div style={currentStyles.heroContent}>
-                <img src={golpoIcon} style={currentStyles.logo} alt="Golpo AI" />
-                <h1 style={currentStyles.heroTitle}>{APP_TITLE}</h1>
-              </div>
-              <button
-                onClick={handleOpenApiKeyModal}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  padding: "6px 12px",
-                  borderRadius: "999px",
-                  border: "1px solid rgba(148, 163, 184, 0.35)",
-                  background: "linear-gradient(135deg, #fff7f5, #fef3ff)",
-                  color: "#0f172a",
-                  fontSize: "12px",
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  transition: "all 0.2s",
-                  whiteSpace: "nowrap",
-                  boxShadow: "0 2px 6px rgba(15, 23, 42, 0.08)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.boxShadow = "0 3px 8px rgba(15, 23, 42, 0.16)";
-                  e.currentTarget.style.transform = "translateY(-1px)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.boxShadow = "0 2px 6px rgba(15, 23, 42, 0.08)";
-                  e.currentTarget.style.transform = "translateY(0)";
-                }}
-              >
-                <span
-                  aria-hidden
-                  style={{
-                    width: 16,
-                    height: 16,
-                    borderRadius: "999px",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    background: "rgba(148, 163, 184, 0.16)",
-                  }}
-                >
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    xmlns="http://www.w3.org/2000/svg"
-                  >
-                    <path
-                      d="M12 15.5C13.933 15.5 15.5 13.933 15.5 12C15.5 10.067 13.933 8.5 12 8.5C10.067 8.5 8.5 10.067 8.5 12C8.5 13.933 10.067 15.5 12 15.5Z"
-                      stroke="#64748B"
-                      strokeWidth="1.6"
-                    />
-                    <path
-                      d="M4.75 12.0001C4.75 11.6301 4.78 11.2701 4.84 10.9201L3.11 9.64006C2.93 9.50006 2.88 9.25006 2.99 9.05006L4.39 6.61006C4.5 6.41006 4.74 6.33006 4.95 6.39006L7.12 7.03006C7.57 6.69006 8.06 6.40006 8.59 6.17006L8.93 3.93006C8.96 3.71006 9.15 3.55006 9.38 3.55006H12.62C12.85 3.55006 13.04 3.71006 13.07 3.93006L13.41 6.17006C13.94 6.40006 14.43 6.69006 14.88 7.03006L17.05 6.39006C17.26 6.33006 17.5 6.41006 17.61 6.61006L19.01 9.05006C19.12 9.25006 19.07 9.50006 18.89 9.64006L17.16 10.9201C17.22 11.2701 17.25 11.6301 17.25 12.0001C17.25 12.3701 17.22 12.7301 17.16 13.0801L18.89 14.3601C19.07 14.5001 19.12 14.7501 19.01 14.9501L17.61 17.3901C17.5 17.5901 17.26 17.6701 17.05 17.6101L14.88 16.9701C14.43 17.3101 13.94 17.6001 13.41 17.8301L13.07 20.0701C13.04 20.2901 12.85 20.4501 12.62 20.4501H9.38C9.15 20.4501 8.96 20.2901 8.93 20.0701L8.59 17.8301C8.06 17.6001 7.57 17.3101 7.12 16.9701L4.95 17.6101C4.74 17.6701 4.5 17.5901 4.39 17.3901L2.99 14.9501C2.88 14.7501 2.93 14.5001 3.11 14.3601L4.84 13.0801C4.78 12.7301 4.75 12.3701 4.75 12.0001Z"
-                      stroke="#A855F7"
-                      strokeWidth="1.6"
-                    />
-                  </svg>
-                </span>
-                <span>Settings</span>
-              </button>
+            <div style={currentStyles.heroContent}>
+              <img src={golpoIcon} style={currentStyles.logo} alt="Golpo AI" />
+              <h1 style={currentStyles.heroTitle}>{APP_TITLE}</h1>
             </div>
           </section>
         </header>
@@ -4775,116 +4592,145 @@ function App() {
         </div>
       )}
 
-      {/* API Key Configuration Modal */}
-      {showApiKeyModal && (
-        <div style={styles.modalOverlay}>
-          <div style={styles.modal}>
-            {/* Modal Header */}
-            <div style={styles.modalHeader}>
-              <div>
-                <h3 style={styles.modalTitle}>Configure Golpo AI API Key</h3>
-                <p style={{ margin: "8px 0 0 0", fontSize: "14px", color: "#64748b" }}>
-                  Enter your Golpo AI API key to generate videos. Your API key is stored securely and is only accessible by you.
-                </p>
-              </div>
-            </div>
+      {/* API Key Configuration Modal - Removed (using admin API key from global page) */}
 
-            {/* Modal Body */}
-            <div style={styles.modalForm}>
-              <div style={styles.formField}>
-                <label style={styles.formLabel}>API Key</label>
-                <input
-                  type="text"
-                  style={styles.formInput}
-                  placeholder="Enter your Golpo AI API key"
-                  value={
-                    isEditingApiKey
-                      ? apiKey
-                      : apiKey || (apiKeyMasked && !apiKey ? apiKeyMasked : "")
-                  }
-                  onChange={(e) => {
-                    setApiKey(e.target.value);
-                    // Hide the \"API key configured\" message while user is editing
-                    if (apiKeyConfigured) {
-                      setApiKeyConfigured(false);
-                    }
-                  }}
-                  disabled={isSavingApiKey}
-                  onFocus={(e) => {
-                    // Clear the masked key only when not already in edit mode
-                    if (!isEditingApiKey && apiKeyMasked && !apiKey) {
-                      setApiKey("");
-                      e.target.value = "";
-                    }
-                  }}
+      {showVideoExistsModal && (
+        <div style={styles.videoExistsOverlay}>
+          <div style={styles.videoExistsCard}>
+            <div style={styles.videoExistsHeader}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                <rect x="2" y="4" width="14" height="12" rx="3" stroke="#FF4D6D" strokeWidth="2" />
+                <path
+                  d="M16 10L21 6V18L16 14"
+                  stroke="#FF4D6D"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
                 />
-                {apiKeyMasked && apiKeyConfigured && (
-                  <p style={{ margin: "8px 0 0 0", fontSize: "13px", color: "#64748b" }}>
-                    Click "Update API Key" to replace the existing key.
-                  </p>
-                )}
-              </div>
-
-              {/* Status Message */}
-              {apiKeyConfigured && apiKeyMasked && (
-                <div style={{
-                  marginTop: "16px",
-                  padding: "12px 16px",
-                  borderRadius: "8px",
-                  background: "#F0FDF4",
-                  border: "1px solid #86EFAC",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  fontSize: "14px",
-                  color: "#166534"
-                }}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M20 6L9 17l-5-5" />
-                  </svg>
-                  <span> API key configured</span>
-                </div>
-              )}
-
-              {/* Error Display */}
-              {error && (
-                <div style={{ marginTop: "16px", padding: "12px", background: "#FEE2E2", borderRadius: "8px", color: "#DC2626", fontSize: "14px" }}>
-                  {error}
-                </div>
-              )}
+              </svg>
+              <h3 style={styles.videoExistsTitle}>Video Already Exists</h3>
             </div>
-
-            {/* Modal Footer */}
-            <div style={styles.modalFooter}>
+            <p style={styles.videoExistsMessage}>
+              A video has already been generated for this context combination. You can either view the existing video or generate a new one.
+            </p>
+            <div style={styles.videoExistsActions}>
               <button
-                style={styles.modalCancelButton}
-                onClick={() => {
-                  setShowApiKeyModal(false);
-                  setApiKey("");
-                  setIsEditingApiKey(false);
-                  setError("");
-                }}
-                disabled={isSavingApiKey}
+                style={styles.videoExistsCancelButton}
+                onClick={() => setShowVideoExistsModal(false)}
               >
                 Cancel
               </button>
               <button
-                style={{
-                  ...styles.modalGenerateButton,
-                  ...(isSavingApiKey ? styles.modalGenerateButtonDisabled : {}),
+                style={styles.videoExistsGoToButton}
+                onClick={async () => {
+                  setShowVideoExistsModal(false);
+                   setIsLoadingVideo(true);
+                   setError("");
+                  
+                  try {
+                    // Fetch page ID using the same logic as openModal
+                    let targetId = await resolvePageId();
+                    
+                    if (!targetId) {
+                      // Try fallback methods
+                      try {
+                        const currentPage = await safeInvoke("getCurrentPage", {});
+                        if (currentPage?.id && currentPage.id !== "unknown" && currentPage.id !== "current") {
+                          targetId = currentPage.id;
+                        }
+                      } catch (invokeErr) {
+                        if (invokeErr.message !== "INVOKE_NOT_AVAILABLE") {
+                          console.warn("[GolpoAI] Go to Video: getCurrentPage failed:", invokeErr);
+                        }
+                      }
+                      
+                      if (!targetId) {
+                        try {
+                          const context = await getContext();
+                          const pageId = extractPageIdFromContext(context);
+                          if (pageId) {
+                            targetId = pageId;
+                          }
+                        } catch (contextErr) {
+                          console.warn("[GolpoAI] Go to Video: getContext() failed:", contextErr);
+                        }
+                      }
+                      
+                      if (!targetId) {
+                        targetId = getPageIdFromUrl();
+                      }
+                    }
+                    
+                    if (!targetId) {
+                      setError("Unable to fetch page ID. Please try again.");
+                       setIsLoadingVideo(false);
+                      return;
+                    }
+                    
+                    // Fetch page content to get the latest video URL
+                    const pageResponse = await safeInvoke("getPageById", { pageId: targetId });
+                    const pageBody = pageResponse?.body;
+                    
+                    if (!pageBody) {
+                      setError("Unable to fetch page content. Please try again.");
+                       setIsLoadingVideo(false);
+                      return;
+                    }
+                    
+                     // Extract all video URLs from page body and comments
+                     const footerResponse = await safeInvoke("getFooterComments", { pageId: targetId });
+                     const footerResult = footerResponse?.body?.results || [];
+                     const allUrls = extractAllVideoUrls(pageBody, footerResult);
+                     
+                     if (allUrls.length === 0) {
+                       setError("No videos found on this page.");
+                       setIsLoadingVideo(false);
+                      return;
+                    }
+                     
+                     setAllVideoUrls(allUrls);
+                     // Use last video (newest since comments are added at the end)
+                     const recentVideoUrl = allUrls[allUrls.length - 1];
+                     setCurrentVideoIndex(allUrls.length - 1);
+                    
+                    // Set up video info for modal playback
+                    const normalizedInfo = {
+                      jobId: null,
+                      videoUrl: recentVideoUrl,
+                      downloadUrl: recentVideoUrl,
+                      status: "completed",
+                      raw: { video_url: recentVideoUrl }
+                    };
+                    setVideoReadyInfo(normalizedInfo);
+                    setLatestVideoUrl(recentVideoUrl);
+                    setShowVideoPlayerModal(true);
+                    await prepareVideoSource(recentVideoUrl);
+                    // Ensure loading state is false so loading overlay is removed
+                    setIsLoadingVideo(false);
+                  } catch (err) {
+                    console.error("[GolpoAI] Go to Video failed:", err);
+                    setError(err?.message || "Unable to fetch video. Please try again.");
+                     setIsLoadingVideo(false);
+                  }
                 }}
-                onClick={handleApiKeyPrimaryClick}
-                disabled={
-                  isSavingApiKey ||
-                  // When no key exists OR we're editing, require non-empty input
-                  ((!apiKeyConfigured || isEditingApiKey) && !apiKey.trim())
-                }
               >
-                {isSavingApiKey
-                  ? "Saving..."
-                  : apiKeyConfigured && !isEditingApiKey
-                    ? "Update API Key"
-                    : "Save API Key"}
+                <span style={styles.videoExistsPlayIcon}>▶</span>
+                Go to Video
+              </button>
+              <button
+                style={styles.videoExistsRegenerateButton}
+                onClick={async () => {
+                  setShowVideoExistsModal(false);
+                  try {
+                    await openModal();
+                  } catch (err) {
+                    console.error("[GolpoAI] Failed to open modal after regenerate:", err);
+                    setError(err?.message || "Unable to open the video generator. Please try again.");
+                  }
+                }}
+              >
+                <SparklesIcon size={18} />
+                Regenerate
               </button>
             </div>
           </div>
