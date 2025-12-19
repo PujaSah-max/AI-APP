@@ -2008,7 +2008,7 @@ function App() {
           });
           setVideoJobId(storedJobId);
           setIsGeneratingVideo(true);
-          setVideoStatusMessage("Status: Processing - Video generation in progress...");
+          setVideoStatusMessage("Processing");
           
           // Start polling for status updates
           if (completionCheckIntervalRef.current) {
@@ -2050,7 +2050,7 @@ function App() {
                   
                   // Clear generation result and show completion
                   setVideoGenerationResult(null);
-                  setVideoStatusMessage("Status: Complete");
+                  setVideoStatusMessage("Complete");
                   
                   // Wait a moment, then show completion popup
                   // Even if modal was dismissed, show completion popup when video is ready
@@ -3578,19 +3578,14 @@ function App() {
       return;
     }
 
-    // Check if video already exists
-    if (latestVideoUrl) {
-      setShowVideoExistsModal(true);
-      return;
-    }
-
+    // Always proceed to generate/regenerate - no modal check
     try {
       await openModal();
     } catch (err) {
       console.error("[GolpoAI] handleGenerateVideoClick failed:", err);
       setError(err?.message || "Unable to open the video generator. Please try again.");
     }
-  }, [actionLoading, description.length, openModal, latestVideoUrl]);
+  }, [actionLoading, description.length, openModal]);
 
   // Handle video generation
   const handleGenerateVideo = async () => {
@@ -3905,43 +3900,47 @@ function App() {
     ...styles,
     page: {
       ...styles.page,
-      padding: "20px",
+      padding: "10px 14px",
       width: "100%",
       maxWidth: "100%",
       height: "100%",
       minHeight: "100%",
+      maxHeight: "100%",
       overflow: "auto",
+      margin: 0,
     },
     closeButton: {
       ...styles.closeButton,
-      top: "20px",
-      right: "20px",
-      fontSize: "24px",
+      top: "4px",
+      right: "4px",
+      fontSize: "20px",
     },
     heroContainer: {
       ...styles.heroContainer,
-      marginBottom: "16px",
+      marginBottom: "12px",
     },
     heroCard: {
       ...styles.heroCard,
-      padding: "18px 24px",
+      padding: "10px 14px",
     },
     heroContent: {
       ...styles.heroContent,
-      gap: "14px",
+      gap: "8px",
     },
     logo: {
       ...styles.logo,
-      width: 64,
-      height: 64,
+      width: 40,
+      height: 40,
     },
     heroTitle: {
       ...styles.heroTitle,
-      fontSize: "26px",
+      fontSize: "16px",
+      fontWeight: 700,
+      letterSpacing: "-0.01em",
     },
     scrollArea: {
       ...styles.scrollArea,
-      marginTop: "16px",
+      marginTop: "8px",
       maxHeight: "none",
       overflowY: "visible",
       overflowX: "hidden",
@@ -3949,23 +3948,32 @@ function App() {
     },
     helpHeading: {
       ...styles.helpHeading,
-      fontSize: "18px",
+      fontSize: "15px",
+      fontWeight: 600,
       marginBottom: "8px",
+      letterSpacing: "-0.01em",
     },
     mainHeading: {
       ...styles.mainHeading,
-      fontSize: "16px",
-      marginBottom: "16px",
+      fontSize: "13px",
+      fontWeight: 500,
+      marginBottom: "8px",
+      lineHeight: 1.5,
     },
     sectionHeading: {
       ...styles.sectionHeading,
-      fontSize: "18px",
+      fontSize: "14px",
+      fontWeight: 600,
       marginBottom: "8px",
+      letterSpacing: "-0.01em",
     },
     sectionDescription: {
       ...styles.sectionDescription,
-      fontSize: "15px",
-      marginBottom: "16px",
+      fontSize: "12px",
+      fontWeight: 400,
+      marginBottom: "12px",
+      lineHeight: 1.5,
+      color: "#64748b",
     },
     contentSection: {
       ...styles.contentSection,
@@ -3973,67 +3981,100 @@ function App() {
     },
     actionList: {
       ...styles.actionList,
-      gap: "12px",
+      gap: "8px",
     },
     actionButton: {
       ...styles.actionButton,
-      padding: "14px 20px",
-      fontSize: "15px",
-      gap: "14px",
+      padding: "10px 14px",
+      fontSize: "12px",
+      gap: "8px",
+      lineHeight: 1.4,
     },
     actionIconWrapper: {
       ...styles.actionIconWrapper,
-      width: "32px",
-      height: "32px",
+      width: "24px",
+      height: "24px",
     },
     contextSection: {
       ...styles.contextSection,
-      marginTop: "16px",
+      marginTop: "12px",
       maxHeight: "none",
     },
     contextCard: {
       ...styles.contextCard,
-      gap: "10px",
-      marginBottom: "16px",
+      gap: "8px",
+      marginBottom: "12px",
       overflow: "visible",
     },
     pageCard: {
       ...styles.pageCard,
-      padding: "14px 18px",
+      padding: "12px 14px",
       overflow: "visible",
+      borderRadius: "12px",
     },
     pageTitle: {
       ...styles.pageTitle,
-      fontSize: "16px",
+      fontSize: "13px",
+      fontWeight: 600,
       marginBottom: "6px",
+      lineHeight: 1.4,
     },
     pageSummary: {
       ...styles.pageSummary,
-      fontSize: "13px",
+      fontSize: "11px",
+      lineHeight: 1.5,
+      color: "#64748b",
     },
     textareaLabel: {
       ...styles.textareaLabel,
-      fontSize: "15px",
-      marginBottom: "10px",
+      fontSize: "13px",
+      fontWeight: 600,
+      marginBottom: "8px",
+      letterSpacing: "-0.01em",
     },
     textarea: {
       ...styles.textarea,
-      height: 110,
-      minHeight: 110,
-      maxHeight: 110,
-      padding: "14px",
-      fontSize: "15px",
+      height: 70,
+      minHeight: 70,
+      maxHeight: 70,
+      padding: "10px 12px",
+      fontSize: "12px",
+      lineHeight: 1.5,
+      borderRadius: "12px",
     },
     textareaFooter: {
       ...styles.textareaFooter,
-      marginTop: "12px",
-      fontSize: "13px",
+      marginTop: "8px",
+      fontSize: "11px",
+      lineHeight: 1.4,
     },
     generateButton: {
       ...styles.generateButton,
-      padding: "12px 20px",
-      fontSize: "15px",
-      gap: "10px",
+      padding: "10px 18px",
+      fontSize: "13px",
+      fontWeight: 600,
+      gap: "8px",
+      letterSpacing: "-0.01em",
+    },
+    latestVideoCard: {
+      ...styles.latestVideoCard,
+      marginTop: 20,
+      padding: "10px 12px",
+      marginBottom: 16,
+      gap: 8,
+    },
+    latestVideoSubtitle: {
+      ...styles.latestVideoSubtitle,
+      fontSize: "12px",
+      fontWeight: 500,
+      marginBottom: "8px",
+      lineHeight: 1.4,
+    },
+    latestVideoUrlLink: {
+      ...styles.latestVideoUrlLink,
+      fontSize: "11px",
+      lineHeight: 1.5,
+      wordBreak: "break-all",
     },
   } : styles;
 
@@ -4078,13 +4119,13 @@ function App() {
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
-                  gap: "8px",
-                  padding: "8px 18px",
+                  gap: "6px",
+                  padding: "6px 12px",
                   borderRadius: "999px",
                   border: "1px solid rgba(148, 163, 184, 0.35)",
                   background: "linear-gradient(135deg, #fff7f5, #fef3ff)",
                   color: "#0f172a",
-                  fontSize: "14px",
+                  fontSize: "12px",
                   fontWeight: 600,
                   cursor: "pointer",
                   transition: "all 0.2s",
@@ -4103,8 +4144,8 @@ function App() {
                 <span
                   aria-hidden
                   style={{
-                    width: 20,
-                    height: 20,
+                    width: 16,
+                    height: 16,
                     borderRadius: "999px",
                     display: "inline-flex",
                     alignItems: "center",
@@ -4113,8 +4154,8 @@ function App() {
                   }}
                 >
                   <svg
-                    width="14"
-                    height="14"
+                    width="12"
+                    height="12"
                     viewBox="0 0 24 24"
                     fill="none"
                     xmlns="http://www.w3.org/2000/svg"
@@ -4229,21 +4270,6 @@ function App() {
             </div>
           </section>
 
-          {/* Context Section - Display current page */}
-          {pages.length > 0 && (
-            <section style={currentStyles.contextSection}>
-              <h2 style={currentStyles.sectionHeading}>Context</h2>
-              <div style={currentStyles.contextCard}>
-                {pages.map((page) => (
-                  <div key={page.id} style={currentStyles.pageCard}>
-                    <h3 style={currentStyles.pageTitle}>{page.title}</h3>
-                    <p style={currentStyles.pageSummary}>{page.summary}</p>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-
           {/* Describe your video section */}
           <section style={currentStyles.contextSection}>
             <label style={currentStyles.textareaLabel}>Describe your video</label>
@@ -4266,25 +4292,29 @@ function App() {
                 }}
                 type="button"
               >
-                <span style={currentStyles.generateButtonIcon} aria-hidden>
-                  <svg
-                    width="24"
-                    height="24"
-                    viewBox="0 0 36 36"
-                    fill="none"
-                    xmlns="http://www.w3.org/2000/svg"
-                  >
-                    <rect x="4" y="9" width="20" height="18" rx="6" stroke={description.length > 0 ? "#FF4D6D" : "#fff"} strokeWidth="3" fill="none" />
-                    <path
-                      d="M24 16.5L31 12V24L24 19.5"
-                      stroke={description.length > 0 ? "#FF4D6D" : "#fff"}
-                      strokeWidth="3"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </span>
-                <span>Generate Video</span>
+                {latestVideoUrl ? (
+                  <SparklesIcon size={20} />
+                ) : (
+                  <span style={currentStyles.generateButtonIcon} aria-hidden>
+                    <svg
+                      width="24"
+                      height="24"
+                      viewBox="0 0 36 36"
+                      fill="none"
+                      xmlns="http://www.w3.org/2000/svg"
+                    >
+                      <rect x="4" y="9" width="20" height="18" rx="6" stroke={description.length > 0 ? "#FF4D6D" : "#fff"} strokeWidth="3" fill="none" />
+                      <path
+                        d="M24 16.5L31 12V24L24 19.5"
+                        stroke={description.length > 0 ? "#FF4D6D" : "#fff"}
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </span>
+                )}
+                <span>{latestVideoUrl ? "Regenerate" : "Generate Video"}</span>
               </button>
             </div>
           </section>
@@ -4299,7 +4329,6 @@ function App() {
               {/* Loader overlay */}
               {actionLoading && (
                 <div style={styles.modalLoaderOverlay}>
-                  <div style={styles.modalLoaderSpinner} />
                   <p style={styles.modalLoaderText}>Loading form...</p>
                 </div>
               )}
@@ -4504,7 +4533,7 @@ function App() {
         )}
       </div>
 
-      {(isGeneratingVideo || isPollingVideoStatus) && !modalDismissedRef.current && (() => {
+      {isGeneratingVideo && !modalDismissedRef.current && (() => {
         // Check if we're on the correct page before showing modal
         const storedPageId = localStorage.getItem('golpo_video_page_id');
         const isOnCorrectPage = !storedPageId || !currentPageId || currentPageId === storedPageId;
@@ -4517,100 +4546,86 @@ function App() {
         return (
         <div style={styles.loadingOverlay}>
           <div style={styles.loadingCard}>
-            <button
-              type="button"
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                
-                // Only allow closing once a job has been created
-                if (!videoJobId) {
-                  console.log("[GolpoAI] Close button clicked but no job ID yet, ignoring...");
-                  return;
-                }
-                
-                // Prevent multiple rapid clicks - check FIRST before any state changes
-                if (isClosingModalRef.current) {
-                  console.log("[GolpoAI] Close already in progress, ignoring click");
-                  return;
-                }
-                
-                // Set flag IMMEDIATELY to prevent any subsequent clicks
-                isClosingModalRef.current = true;
-                
-                console.log("[GolpoAI] Closing video generation modal, job ID:", videoJobId);
-                
-                // Set flags FIRST to prevent modal from reopening
-                modalDismissedRef.current = true; // Session-level flag
-                localStorage.setItem('golpo_video_modal_dismissed', 'true'); // Persist for app revisit
-                
-                // DON'T clear the interval - let polling continue in background
-                // Polling will continue but won't reopen the modal
-                
-                // Update states to close modal immediately - set both flags that control modal visibility
-                setIsGeneratingVideo(false);
-                setIsPollingVideoStatus(false);
-                setVideoStatusMessage("");
-                setVideoGenerationResult(null);
-                
-                console.log("[GolpoAI] Modal closed - polling continues in background");
-                
-                // Reset closing flag after a delay to allow state updates to complete
-                setTimeout(() => {
-                  isClosingModalRef.current = false;
-                }, 500);
-              }}
-              disabled={!videoJobId}
-              style={{
-                ...styles.loadingCloseButton,
-                opacity: videoJobId ? 1 : 0.4,
-                cursor: videoJobId ? "pointer" : "not-allowed",
-                pointerEvents: videoJobId ? "auto" : "none",
-                zIndex: 1001,
-              }}
-              title={
-                videoJobId
-                  ? "Close"
-                  : "Please wait while we start video generation..."
-              }
-              onMouseEnter={(e) => {
-                if (videoJobId) {
+            {/* First stage: fetching documents / starting job (show spinner, no close) */}
+            {!videoJobId && (
+              <div style={{ marginBottom: 16, display: "flex", justifyContent: "center" }}>
+                <div style={styles.loadingSpinner} />
+              </div>
+            )}
+
+            {/* Second stage: job created & processing (no spinner, allow close after completion) */}
+            {videoJobId && videoStatusMessage === "Complete" && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  
+                  // Prevent multiple rapid clicks - check FIRST before any state changes
+                  if (isClosingModalRef.current) {
+                    console.log("[GolpoAI] Close already in progress, ignoring click");
+                    return;
+                  }
+                  
+                  // Set flag IMMEDIATELY to prevent any subsequent clicks
+                  isClosingModalRef.current = true;
+                  
+                  console.log("[GolpoAI] Closing video generation modal, job ID:", videoJobId);
+                  
+                  // Set flags FIRST to prevent modal from reopening
+                  modalDismissedRef.current = true; // Session-level flag
+                  localStorage.setItem('golpo_video_modal_dismissed', 'true'); // Persist for app revisit
+                  
+                  // DON'T clear the interval - let polling continue in background
+                  // Polling will continue but won't reopen the modal
+                  
+                  // Update states to close modal immediately - set both flags that control modal visibility
+                  setIsGeneratingVideo(false);
+                  setIsPollingVideoStatus(false);
+                  setVideoStatusMessage("");
+                  setVideoGenerationResult(null);
+                  
+                  console.log("[GolpoAI] Modal closed - polling continues in background");
+                  
+                  // Reset closing flag after a delay to allow state updates to complete
+                  setTimeout(() => {
+                    isClosingModalRef.current = false;
+                  }, 500);
+                }}
+                style={{
+                  ...styles.loadingCloseButton,
+                  zIndex: 1001,
+                }}
+                title="Close"
+                onMouseEnter={(e) => {
                   e.target.style.color = "#1e293b";
                   e.target.style.background = "#e2e8f0";
                   e.target.style.borderColor = "#cbd5e1";
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (videoJobId) {
+                }}
+                onMouseLeave={(e) => {
                   e.target.style.color = "#475569";
                   e.target.style.background = "#f8fafc";
                   e.target.style.borderColor = "#e2e8f0";
-                }
-              }}
-            >
-              ×
-            </button>
-            <div style={styles.loadingSpinner} />
+                }}
+              >
+                ×
+              </button>
+            )}
             
-            <h3 style={styles.loadingTitle}>
-              {videoStatusMessage === "Status: Complete" ? "Video generation complete!" : "Generating your Golpo video"}
-            </h3>
-            {videoStatusMessage && (
-              <p style={styles.loadingMessage}>{videoStatusMessage}</p>
-            )}
-            {videoJobId && (
-              <p style={styles.loadingJobId}>Job ID: {videoJobId}</p>
-            )}
+            <h3 style={styles.loadingTitle}>Generating your Golpo video</h3>
+            <p style={styles.loadingMessage}>
+              {!videoJobId
+                ? "We’re fetching your page content and preparing your video request..."
+                : "We’re working on your video. This may take a few minutes."}
+            </p>
             <p style={styles.loadingSubtext}>
-              {videoJobId ? (
+              {!videoJobId ? (
                 <>
-                  Video generation will take some time .
-                  <br />
-                  <strong>You can close this window - the video will be saved to page comments when ready!</strong>
+                  <strong>Please wait while we start video generation...</strong>
                 </>
               ) : (
                 <>
-                  <strong>Please wait while we start video generation...</strong>
+                  <strong>You can safely close this window.</strong> The video link will be automatically added to your page comments once it's ready.
                 </>
               )}
             </p>
@@ -4857,7 +4872,6 @@ function App() {
                 style={{
                   ...styles.modalGenerateButton,
                   ...(isSavingApiKey ? styles.modalGenerateButtonDisabled : {}),
-                  background: "#DC2626",
                 }}
                 onClick={handleApiKeyPrimaryClick}
                 disabled={
@@ -4871,149 +4885,6 @@ function App() {
                   : apiKeyConfigured && !isEditingApiKey
                     ? "Update API Key"
                     : "Save API Key"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showVideoExistsModal && (
-        <div style={styles.videoExistsOverlay}>
-          <div style={styles.videoExistsCard}>
-            <div style={styles.videoExistsHeader}>
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                <rect x="2" y="4" width="14" height="12" rx="3" stroke="#FF4D6D" strokeWidth="2" />
-                <path
-                  d="M16 10L21 6V18L16 14"
-                  stroke="#FF4D6D"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              <h3 style={styles.videoExistsTitle}>Video Already Exists</h3>
-            </div>
-            <p style={styles.videoExistsMessage}>
-              A video has already been generated for this context combination. You can either view the existing video or generate a new one.
-            </p>
-            <div style={styles.videoExistsActions}>
-              <button
-                style={styles.videoExistsCancelButton}
-                onClick={() => setShowVideoExistsModal(false)}
-              >
-                Cancel
-              </button>
-              <button
-                style={styles.videoExistsGoToButton}
-                onClick={async () => {
-                  setShowVideoExistsModal(false);
-                   setIsLoadingVideo(true);
-                   setError("");
-                  
-                  try {
-                    // Fetch page ID using the same logic as openModal
-                    let targetId = await resolvePageId();
-                    
-                    if (!targetId) {
-                      // Try fallback methods
-                      try {
-                        const currentPage = await safeInvoke("getCurrentPage", {});
-                        if (currentPage?.id && currentPage.id !== "unknown" && currentPage.id !== "current") {
-                          targetId = currentPage.id;
-                        }
-                      } catch (invokeErr) {
-                        if (invokeErr.message !== "INVOKE_NOT_AVAILABLE") {
-                          console.warn("[GolpoAI] Go to Video: getCurrentPage failed:", invokeErr);
-                        }
-                      }
-                      
-                      if (!targetId) {
-                        try {
-                          const context = await getContext();
-                          const pageId = extractPageIdFromContext(context);
-                          if (pageId) {
-                            targetId = pageId;
-                          }
-                        } catch (contextErr) {
-                          console.warn("[GolpoAI] Go to Video: getContext() failed:", contextErr);
-                        }
-                      }
-                      
-                      if (!targetId) {
-                        targetId = getPageIdFromUrl();
-                      }
-                    }
-                    
-                    if (!targetId) {
-                      setError("Unable to fetch page ID. Please try again.");
-                       setIsLoadingVideo(false);
-                      return;
-                    }
-                    
-                    // Fetch page content to get the latest video URL
-                    const pageResponse = await safeInvoke("getPageById", { pageId: targetId });
-                    const pageBody = pageResponse?.body;
-                    
-                    if (!pageBody) {
-                      setError("Unable to fetch page content. Please try again.");
-                       setIsLoadingVideo(false);
-                      return;
-                    }
-                    
-                     // Extract all video URLs from page body and comments
-                     const footerResponse = await safeInvoke("getFooterComments", { pageId: targetId });
-                     const footerResult = footerResponse?.body?.results || [];
-                     const allUrls = extractAllVideoUrls(pageBody, footerResult);
-                     
-                     if (allUrls.length === 0) {
-                       setError("No videos found on this page.");
-                       setIsLoadingVideo(false);
-                      return;
-                    }
-                     
-                     setAllVideoUrls(allUrls);
-                     // Use last video (newest since comments are added at the end)
-                     const recentVideoUrl = allUrls[allUrls.length - 1];
-                     setCurrentVideoIndex(allUrls.length - 1);
-                    
-                    // Set up video info for modal playback
-                    const normalizedInfo = {
-                      jobId: null,
-                      videoUrl: recentVideoUrl,
-                      downloadUrl: recentVideoUrl,
-                      status: "completed",
-                      raw: { video_url: recentVideoUrl }
-                    };
-                    setVideoReadyInfo(normalizedInfo);
-                    setLatestVideoUrl(recentVideoUrl);
-                    setShowVideoPlayerModal(true);
-                    await prepareVideoSource(recentVideoUrl);
-                    // Ensure loading state is false so loading overlay is removed
-                    setIsLoadingVideo(false);
-                  } catch (err) {
-                    console.error("[GolpoAI] Go to Video failed:", err);
-                    setError(err?.message || "Unable to fetch video. Please try again.");
-                     setIsLoadingVideo(false);
-                  }
-                }}
-              >
-                <span style={styles.videoExistsPlayIcon}>▶</span>
-                Go to Video
-              </button>
-              <button
-                style={styles.videoExistsRegenerateButton}
-                onClick={async () => {
-                  setShowVideoExistsModal(false);
-                  try {
-                    await openModal();
-                  } catch (err) {
-                    console.error("[GolpoAI] Failed to open modal after regenerate:", err);
-                    setError(err?.message || "Unable to open the video generator. Please try again.");
-                  }
-                }}
-              >
-                <SparklesIcon size={18} />
-                Regenerate
               </button>
             </div>
           </div>
@@ -5042,9 +4913,21 @@ function App() {
 
             <div style={styles.videoModalBody}>
               {isVideoTooLarge ? (
-                <p style={styles.videoModalMessage}>
-                  This video is too large to play in the modal. Use the buttons below to copy the URL or download it.
-                </p>
+                <>
+                  <p style={styles.videoModalMessage}>
+                    This video is ready, but it’s too large to play inside this window.
+                  </p>
+                  {videoReadyInfo?.videoUrl && (
+                    <a
+                      href={videoReadyInfo.videoUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={styles.videoModalLink}
+                    >
+                      Open video in a new tab
+                    </a>
+                  )}
+                </>
               ) : videoPlayerUrl ? (
                 <video
                   id="modal-video-player"
@@ -5123,26 +5006,36 @@ function App() {
                 />
               ) : (
                 <div style={styles.videoModalLoading}>
-                  <div style={styles.loadingSpinner} />
-                  <h4 style={styles.loadingTitle}>Loading video...</h4>
-                  <p style={styles.loadingMessage}>Fetching video data and preparing playback</p>
+                  <h4 style={styles.loadingTitle}>Preparing your video</h4>
+                  <p style={styles.loadingMessage}>Please wait while we load your video...</p>
                 </div>
               )}
             </div>
 
             <div style={styles.videoReadyActions}>
-              <button
-                style={styles.videoReadyPrimaryButton}
-                onClick={() => handleCopyVideoUrl(videoReadyInfo.videoUrl)}
-              >
-                Copy URL
-              </button>
-              <button
-                style={styles.videoReadySecondaryButton}
-                onClick={handleDownloadVideo}
-              >
-                Download
-              </button>
+              {isVideoTooLarge ? (
+                <button
+                  style={styles.videoReadySecondaryButton}
+                  onClick={handleDownloadVideo}
+                >
+                  Download
+                </button>
+              ) : (
+                <>
+                  <button
+                    style={styles.videoReadyPrimaryButton}
+                    onClick={() => handleCopyVideoUrl(videoReadyInfo.videoUrl)}
+                  >
+                    Copy URL
+                  </button>
+                  <button
+                    style={styles.videoReadySecondaryButton}
+                    onClick={handleDownloadVideo}
+                  >
+                    Download
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -5164,12 +5057,13 @@ export default App;
 const styles = {
   page: {
     fontFamily: "Segoe UI, sans-serif",
-    padding: "24px",
+    padding: "12px",
     background: "#ffffff",
     width: "100%",
     maxWidth: "100%",
     height: "100%",
     minHeight: "100%",
+    maxHeight: "100%",
     display: "flex",
     flexDirection: "column",
     overflow: "auto",
@@ -5179,29 +5073,29 @@ const styles = {
   },
   closeButton: {
     position: "absolute",
-    top: 20,
-    right: 20,
+    top: 6,
+    right: 6,
     background: "transparent",
     border: "none",
     fontSize: "24px",
     cursor: "pointer",
     fontWeight: 600,
   },
-  heroContainer: { marginBottom: 20, flexShrink: 0 },
+  heroContainer: { marginBottom: 4, flexShrink: 0 },
   heroCard: {
     background: "linear-gradient(to right,  #cac6caff, #f5bdc4ff, #fff7ed)",
-    padding: "20px 24px",
+    padding: "6px 10px",
     borderRadius: "18px",
   },
   latestVideoCard: {
     borderRadius: 16,
     border: "1px solid #d6c9ff",
     background: "#f8f5ff",
-    padding: "16px 20px",
-    marginBottom: 20,
+    padding: "6px 10px",
+    marginBottom: 4,
     display: "flex",
     flexDirection: "column",
-    gap: 8,
+    gap: 2,
   },
   latestVideoPlayerWrapper: {
     marginTop: 8,
@@ -5219,7 +5113,7 @@ const styles = {
     color: "#2B1F35",
   },
   latestVideoSubtitle: {
-    margin: "0 0 8px 0",
+    margin: "0 0 2px 0",
     fontSize: 14,
     color: "#5f4b8b",
   },
@@ -5272,6 +5166,14 @@ const styles = {
     textAlign: "center",
     fontSize: 14,
     color: "#475569",
+  },
+  videoModalLink: {
+    display: "inline-block",
+    marginTop: 8,
+    fontSize: 14,
+    color: "#2563eb",
+    textDecoration: "underline",
+    cursor: "pointer",
   },
   latestVideoActions: {
     display: "flex",
@@ -5328,21 +5230,21 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     minHeight: 0,
-    paddingBottom: 20,
+    paddingBottom: 4,
   },
 
-  helpHeading: { fontSize: 18, marginBottom: 8, marginTop: 0, flexShrink: 0, fontWeight: 700, color: "#1e293b" },
-  mainHeading: { fontSize: 16, marginBottom: 24, marginTop: 0, flexShrink: 0, fontWeight: 400, color: "#1e293b" },
-  sectionHeading: { fontSize: 20, marginBottom: 8, marginTop: 0, flexShrink: 0, fontWeight: 600 },
-  sectionDescription: { fontSize: 15, color: "#555", marginBottom: 18, flexShrink: 0, marginTop: 0 },
-  contentSection: { marginBottom: 20, flexShrink: 0 },
+  helpHeading: { fontSize: 18, marginBottom: 2, marginTop: 0, flexShrink: 0, fontWeight: 700, color: "#1e293b" },
+  mainHeading: { fontSize: 16, marginBottom: 4, marginTop: 0, flexShrink: 0, fontWeight: 400, color: "#1e293b" },
+  sectionHeading: { fontSize: 20, marginBottom: 2, marginTop: 0, flexShrink: 0, fontWeight: 600 },
+  sectionDescription: { fontSize: 15, color: "#555", marginBottom: 4, flexShrink: 0, marginTop: 0 },
+  contentSection: { marginBottom: 4, flexShrink: 0 },
 
-  actionList: { display: "flex", flexDirection: "column", gap: 12, flexShrink: 0 },
+  actionList: { display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 },
   actionButton: {
     display: "flex",
     alignItems: "center",
-    gap: 14,
-    padding: "14px 20px",
+    gap: 6,
+    padding: "8px 12px",
     borderRadius: 14,
     border: "1px solid #ececec",
     cursor: "pointer",

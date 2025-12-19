@@ -5,7 +5,7 @@ modules:
       resource: main
       resolver:
         function: resolver
-      viewportSize: large # you STILL get large Custom UI popup
+      viewportSize: medium 
       icon: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAACX\
         BIWXMAAAsTAAALEwEAmpwYAAAEM0lEQVR4nO3Y3U9bZRwHcP6XnbaHtueU4jqKYMgwAu0KL\
         aWjOKnZmLwUGa3dSma3YoiWTaUhxBlxlqCJZOrGvAEvvNOLjSzT4QUxKjV4QwSUhgHnufya\
