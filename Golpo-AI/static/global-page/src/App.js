@@ -27,7 +27,7 @@ function App() {
       title: "Find a Confluence page",
       description:
         "Open the page you want to explain using a video.",
-      image: "./nav-search.png",
+      image: "/step 1.png",
       details: [
         "Use the Confluence search bar to find relevant content",
         "Open the page you want to convert into a video"
@@ -38,7 +38,7 @@ function App() {
       id: 2,
       title: 'Access Golpo AI from page menu',
       description: 'Open the three dots menu and find Golpo AI under Apps',
-      image: './nav-menu.png',
+      image: '/step 2.png',
       details: [
         'Open any Confluence page you want to work with',
         'Look for the three dots (⋯) button in the top right corner of the page header, next to Edit and Share buttons',
@@ -53,8 +53,8 @@ function App() {
       id: 3,
       title: 'Using Golpo AI to generate videos',
       description: 'Create videos from your Confluence pages using action cards and context',
-      image: './nav-ui-1.png',
-      image2: './nav-ui-2.png',
+      image: '/step 3_1.png',
+      image2: '/step 3_2.png',
       details: [
         'When Golpo AI opens, the most recently generated video appears at the top of the panel',
         'The interface has action cards that you can interact with',
@@ -69,7 +69,7 @@ function App() {
       id: 4,
       title: 'View and manage your generated videos',
       description: 'Access and manage your created whiteboard videos',
-      image: './nav-step4.png',
+      image: '/step 4.png',
       details: [
       'Click Go to Video to open the most recently generated video for this page',
 
