@@ -427,11 +427,49 @@ resolver.define('setAdminApiKey', async ({ payload }) => {
     }
     
     // Store API key in storage at app level (not user-specific)
+    // Maintain history of all API keys
     const storageKey = 'golpo-admin-api-key';
+    const historyKey = 'golpo-admin-api-key-history';
+    
+    // Get existing history
+    let apiKeyHistory = [];
+    try {
+      const existingHistory = await storage.get(historyKey);
+      if (existingHistory && Array.isArray(existingHistory.keys)) {
+        apiKeyHistory = existingHistory.keys;
+      }
+    } catch (error) {
+      console.warn('[resolver:setAdminApiKey] Error reading API key history:', error);
+    }
+    
+    // Check if this key already exists in history
+    const keyExists = apiKeyHistory.some(item => item.apiKey === trimmedApiKey);
+    
+    // If key doesn't exist, add it to history
+    if (!keyExists) {
+      const maskedKey = trimmedApiKey.length > 8 
+        ? `${trimmedApiKey.substring(0, 4)}${'*'.repeat(Math.max(0, trimmedApiKey.length - 8))}${trimmedApiKey.substring(trimmedApiKey.length - 4)}`
+        : '****';
+      
+      apiKeyHistory.push({
+        apiKey: trimmedApiKey,
+        maskedKey: maskedKey,
+        addedAt: new Date().toISOString(),
+        updatedBy: 'admin'
+      });
+      
+      // Store updated history
+      await storage.set(historyKey, {
+        keys: apiKeyHistory,
+        lastUpdated: new Date().toISOString()
+      });
+    }
+    
+    // Store current API key (for backward compatibility and quick access)
     await storage.set(storageKey, {
       apiKey: trimmedApiKey,
       updatedAt: new Date().toISOString(),
-      updatedBy: 'admin' // Could store accountId if needed
+      updatedBy: 'admin'
     });
     
     // Return masked version for display
@@ -468,6 +506,174 @@ const getUserApiKeyInternal = async () => {
     return null;
   }
 };
+
+// Helper function to update cumulative credits usage for an API key
+const updateCreditsUsage = async (apiKey, creditsUsed) => {
+  try {
+    if (!apiKey || creditsUsed <= 0) {
+      return;
+    }
+
+    const usageStorageKey = 'golpo-api-key-usage';
+    
+    // Get existing usage data
+    let usageData = {};
+    try {
+      const existing = await storage.get(usageStorageKey);
+      if (existing && typeof existing === 'object') {
+        usageData = existing;
+      }
+    } catch (error) {
+      console.warn('[updateCreditsUsage] Error reading usage data:', error);
+    }
+
+    // Mask the API key for storage key
+    const maskedKey = apiKey.length > 8 
+      ? `${apiKey.substring(0, 4)}${'*'.repeat(Math.max(0, apiKey.length - 8))}${apiKey.substring(apiKey.length - 4)}`
+      : '****';
+
+    // Get or initialize usage for this API key
+    const currentUsage = usageData[maskedKey] || 0;
+    const newUsage = currentUsage + creditsUsed;
+
+    // Update usage data
+    usageData[maskedKey] = newUsage;
+    usageData[`${maskedKey}_lastUpdated`] = new Date().toISOString();
+
+    // Store updated usage data
+    await storage.set(usageStorageKey, usageData);
+    
+    console.log(`[updateCreditsUsage] Updated credits usage for ${maskedKey}: ${currentUsage} + ${creditsUsed} = ${newUsage}`);
+  } catch (error) {
+    console.error('[updateCreditsUsage] Error updating credits usage:', error);
+  }
+};
+
+// Resolver to get credits information for all API keys in history
+resolver.define('getCredits', async () => {
+  try {
+    const historyKey = 'golpo-admin-api-key-history';
+    
+    // Get API key history
+    let apiKeyHistory = [];
+    try {
+      const existingHistory = await storage.get(historyKey);
+      if (existingHistory && Array.isArray(existingHistory.keys)) {
+        apiKeyHistory = existingHistory.keys;
+      }
+    } catch (error) {
+      console.warn('[resolver:getCredits] Error reading API key history:', error);
+    }
+    
+    // If no history, try to get current API key and add it to history
+    if (apiKeyHistory.length === 0) {
+      const currentApiKey = await getUserApiKeyInternal();
+      if (currentApiKey) {
+        const maskedKey = currentApiKey.length > 8 
+          ? `${currentApiKey.substring(0, 4)}${'*'.repeat(Math.max(0, currentApiKey.length - 8))}${currentApiKey.substring(currentApiKey.length - 4)}`
+          : '****';
+        
+        apiKeyHistory = [{
+          apiKey: currentApiKey,
+          maskedKey: maskedKey,
+          addedAt: new Date().toISOString(),
+          updatedBy: 'admin'
+        }];
+      }
+    }
+    
+    if (apiKeyHistory.length === 0) {
+      throw new Error('Golpo API key is not configured. Please contact your administrator to configure the API key in the Global Page Settings.');
+    }
+    
+    // Fetch credits for all API keys in parallel
+    const creditsPromises = apiKeyHistory.map(async (keyItem) => {
+      try {
+        const creditsResponse = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': keyItem.apiKey,
+          },
+        });
+        
+        if (!creditsResponse.ok) {
+          const errorText = await creditsResponse.text();
+          console.warn(`[resolver:getCredits] Failed to fetch credits for key ${keyItem.maskedKey}: ${creditsResponse.status} ${errorText}`);
+          return {
+            apiKey: keyItem.maskedKey,
+            creditsUsage: 0,
+            currentCredits: 0,
+            error: `Failed to fetch: ${creditsResponse.status}`
+          };
+        }
+        
+        const creditsData = await creditsResponse.json();
+        
+        // Get stored cumulative usage for this API key
+        const usageStorageKey = 'golpo-api-key-usage';
+        let storedUsage = 0;
+        try {
+          const usageData = await storage.get(usageStorageKey);
+          console.log(`[resolver:getCredits] Looking for usage data. Masked key: ${keyItem.maskedKey}`);
+          console.log(`[resolver:getCredits] Usage data keys:`, usageData ? Object.keys(usageData) : 'null');
+          if (usageData && typeof usageData === 'object') {
+            // Try exact match first
+            if (usageData[keyItem.maskedKey] !== undefined) {
+              storedUsage = Number(usageData[keyItem.maskedKey]) || 0;
+              console.log(`[resolver:getCredits] Found exact match for ${keyItem.maskedKey}: ${storedUsage}`);
+            } else {
+              // Try to find by matching masked key pattern (first 4 and last 4 chars)
+              const keys = Object.keys(usageData);
+              const keyPrefix = keyItem.maskedKey.substring(0, 4);
+              const keySuffix = keyItem.maskedKey.substring(keyItem.maskedKey.length - 4);
+              const matchingKey = keys.find(k => {
+                if (k === keyItem.maskedKey) return true;
+                if (k.length === keyItem.maskedKey.length && k.startsWith(keyPrefix) && k.endsWith(keySuffix)) return true;
+                return false;
+              });
+              if (matchingKey) {
+                storedUsage = Number(usageData[matchingKey]) || 0;
+                console.log(`[resolver:getCredits] Found usage with matching key pattern: ${matchingKey} = ${storedUsage}`);
+              } else {
+                console.warn(`[resolver:getCredits] No matching key found for ${keyItem.maskedKey}`);
+              }
+            }
+          } else {
+            console.warn(`[resolver:getCredits] Usage data is not an object:`, typeof usageData);
+          }
+        } catch (error) {
+          console.warn(`[resolver:getCredits] Error reading stored usage for ${keyItem.maskedKey}:`, error);
+        }
+        
+        return {
+          apiKey: keyItem.maskedKey,
+          creditsUsage: storedUsage, // Use stored cumulative usage instead of API response
+          currentCredits: creditsData.credits || creditsData.current_credits || 0,
+          addedAt: keyItem.addedAt
+        };
+      } catch (error) {
+        console.error(`[resolver:getCredits] Error fetching credits for key ${keyItem.maskedKey}:`, error);
+        return {
+          apiKey: keyItem.maskedKey,
+          creditsUsage: 0,
+          currentCredits: 0,
+          error: error.message
+        };
+      }
+    });
+    
+    const creditsResults = await Promise.all(creditsPromises);
+    
+    return {
+      success: true,
+      credits: creditsResults
+    };
+  } catch (error) {
+    console.error('[resolver:getCredits] Error:', error);
+    throw new Error(`Failed to fetch credits: ${error?.message || 'Unknown error'}`);
+  }
+});
 
 resolver.define('getFooterComments', async ({ payload }) => {
   try {
@@ -710,6 +916,26 @@ resolver.define('generateVideo', async ({ payload }) => {
 
   if (!API_KEY) {
     throw new Error('Golpo API key is not configured. Please contact your administrator to configure the API key in the Global Page Settings.');
+  }
+
+  // Fetch credits before video generation
+  let creditsBefore = 0;
+  try {
+    const creditsResponseBefore = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+      },
+    });
+    
+    if (creditsResponseBefore.ok) {
+      const creditsDataBefore = await creditsResponseBefore.json();
+      creditsBefore = creditsDataBefore.credits || creditsDataBefore.current_credits || 0;
+      console.log('[resolver:generateVideo] Credits before generation:', creditsBefore);
+    }
+  } catch (error) {
+    console.warn('[resolver:generateVideo] Failed to fetch credits before generation:', error);
   }
 
   // Build the prompt from the document
@@ -996,9 +1222,28 @@ resolver.define('generateVideo', async ({ payload }) => {
     console.log('[resolver:generateVideo] Step 2: Golpo AI API response received');
     console.log('[resolver:generateVideo] Golpo AI API response:', JSON.stringify(data, null, 2));
 
+    // Check if credits info is in the response
+    const responseCredits = data?.credits_used || data?.creditsUsed || data?.credits_deducted || null;
+    
     // Extract jobId and pageId from response/document
     const jobId = data?.job_id || data?.jobId || data?.id || data?.data?.job_id || data?.data?.jobId;
     const pageId = document?.pageId || document?.metadata?.pageId;
+
+    // Store credits before value with jobId for tracking when video completes
+    // Credits are deducted when video generation is completed, not immediately
+    if (jobId && creditsBefore > 0) {
+      try {
+        const jobCreditsKey = `golpo-job-credits-${jobId}`;
+        await storage.set(jobCreditsKey, {
+          creditsBefore: creditsBefore,
+          apiKey: API_KEY,
+          createdAt: new Date().toISOString()
+        });
+        console.log(`[resolver:generateVideo] Stored credits before (${creditsBefore}) for job ${jobId}`);
+      } catch (error) {
+        console.warn('[resolver:generateVideo] Failed to store credits before for job:', error);
+      }
+    }
 
     // If we have a jobId and pageId, store job info in Forge storage for background polling
     if (jobId && pageId) {
@@ -1196,6 +1441,73 @@ resolver.define('getVideoStatus', async ({ payload }) => {
 
     const data = await response.json();
     console.log('[resolver:getVideoStatus] Status response:', JSON.stringify(data, null, 2));
+
+    // Check if video is completed and track credits usage
+    const videoStatus = data?.status || data?.state || data?.body?.status || '';
+    const statusLower = videoStatus.toLowerCase();
+    const isCompleted = statusLower === 'completed' || 
+                       statusLower === 'ready' || 
+                       statusLower === 'success' || 
+                       statusLower === 'finished' || 
+                       statusLower === 'done' ||
+                       statusLower === 'complete';
+
+    if (isCompleted && jobId) {
+      try {
+        // Get stored credits before value for this job
+        const jobCreditsKey = `golpo-job-credits-${jobId}`;
+        const jobCreditsData = await storage.get(jobCreditsKey);
+        
+        if (jobCreditsData && jobCreditsData.creditsBefore && !jobCreditsData.creditsTracked) {
+          const creditsBefore = jobCreditsData.creditsBefore;
+          const apiKey = jobCreditsData.apiKey || API_KEY;
+          
+          // Fetch current credits after completion
+          const creditsResponseAfter = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
+            method: 'GET',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': apiKey,
+            },
+          });
+          
+          if (creditsResponseAfter.ok) {
+            const creditsDataAfter = await creditsResponseAfter.json();
+            const creditsAfter = creditsDataAfter.credits || creditsDataAfter.current_credits || 0;
+            const creditsUsed = creditsBefore - creditsAfter;
+            
+            console.log('[resolver:getVideoStatus] Video completed. Credits tracking:', {
+              jobId: jobId,
+              before: creditsBefore,
+              after: creditsAfter,
+              used: creditsUsed
+            });
+            
+            if (creditsUsed > 0) {
+              console.log('[resolver:getVideoStatus] Credits used for completed video:', creditsUsed);
+              
+              // Update cumulative credits usage for this API key
+              await updateCreditsUsage(apiKey, creditsUsed);
+              
+              // Mark as tracked to avoid double counting
+              await storage.set(jobCreditsKey, {
+                ...jobCreditsData,
+                creditsAfter: creditsAfter,
+                creditsUsed: creditsUsed,
+                creditsTracked: true,
+                trackedAt: new Date().toISOString()
+              });
+            } else {
+              console.warn('[resolver:getVideoStatus] No credits deducted. Before:', creditsBefore, 'After:', creditsAfter);
+            }
+          }
+        } else if (jobCreditsData && jobCreditsData.creditsTracked) {
+          console.log('[resolver:getVideoStatus] Credits already tracked for job:', jobId);
+        }
+      } catch (error) {
+        console.warn('[resolver:getVideoStatus] Error tracking credits for completed video:', error);
+      }
+    }
 
     return {
       status: response.status,

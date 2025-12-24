@@ -20,6 +20,11 @@ function App() {
   const [isLoadingApiKey, setIsLoadingApiKey] = useState(false);
   const [isSavingApiKey, setIsSavingApiKey] = useState(false);
   const [settingsError, setSettingsError] = useState('');
+  const [showCreditsModal, setShowCreditsModal] = useState(false);
+  const [creditsData, setCreditsData] = useState(null);
+  const [creditsList, setCreditsList] = useState([]);
+  const [isLoadingCredits, setIsLoadingCredits] = useState(false);
+  const [creditsError, setCreditsError] = useState('');
 
   const navigationSteps = [
     {
@@ -175,6 +180,66 @@ function App() {
     }
   }, [apiKeyConfigured, isEditingApiKey, handleSaveApiKey]);
 
+  const handleOpenCredits = useCallback(async () => {
+    setShowCreditsModal(true);
+    setIsLoadingCredits(true);
+    setCreditsError('');
+    setCreditsList([]);
+    
+    try {
+      const result = await invoke('getCredits');
+      if (result && result.success) {
+        if (result.credits && Array.isArray(result.credits)) {
+          setCreditsList(result.credits);
+        } else {
+          // Backward compatibility: if single credits object
+          setCreditsData(result);
+          setCreditsList([{
+            apiKey: result.apiKey,
+            creditsUsage: result.creditsUsage,
+            currentCredits: result.currentCredits
+          }]);
+        }
+      } else {
+        setCreditsError(result?.message || 'Failed to load credits information');
+      }
+    } catch (error) {
+      console.error('[App] Error fetching credits:', error);
+      setCreditsError(error?.message || 'Failed to load credits information');
+    } finally {
+      setIsLoadingCredits(false);
+    }
+  }, []);
+
+  const handleRefreshCredits = useCallback(async () => {
+    setIsLoadingCredits(true);
+    setCreditsError('');
+    
+    try {
+      const result = await invoke('getCredits');
+      if (result && result.success) {
+        if (result.credits && Array.isArray(result.credits)) {
+          setCreditsList(result.credits);
+        } else {
+          // Backward compatibility: if single credits object
+          setCreditsData(result);
+          setCreditsList([{
+            apiKey: result.apiKey,
+            creditsUsage: result.creditsUsage,
+            currentCredits: result.currentCredits
+          }]);
+        }
+      } else {
+        setCreditsError(result?.message || 'Failed to refresh credits information');
+      }
+    } catch (error) {
+      console.error('[App] Error refreshing credits:', error);
+      setCreditsError(error?.message || 'Failed to refresh credits information');
+    } finally {
+      setIsLoadingCredits(false);
+    }
+  }, []);
+
   const toggleStep = (stepId) => {
     setExpandedStep(expandedStep === stepId ? null : stepId);
   };
@@ -187,7 +252,7 @@ function App() {
           <div className="brandIconWrap">
             <img
               className="brandIcon"
-              src="./golpo-icon.png"
+              src="./GOLPO_ICON_1.png"
               alt="Golpo AI logo"
             />
           </div>
@@ -200,14 +265,42 @@ function App() {
 
         <div className="actions">
           {isAdmin && (
-            <button
-              className="btn btnSecondary"
-              onClick={handleOpenSettings}
-              disabled={isCheckingAdmin}
-            >
-              Settings
-            </button>
+            <>
+              <button
+                className="btn btnSecondary"
+                onClick={handleOpenSettings}
+                disabled={isCheckingAdmin}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3"></circle>
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                </svg>
+                Settings
+              </button>
+              <button
+                className="btn btnSecondary"
+                onClick={handleOpenCredits}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="1" x2="12" y2="23"></line>
+                  <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+                </svg>
+                Credits
+              </button>
+            </>
           )}
+          <button
+            className="btn btnSecondary"
+            onClick={() => {
+              // TODO: Implement feedback functionality
+              console.log('Feedback clicked');
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+            </svg>
+            Feedback
+          </button>
         </div>
       </header>
 
@@ -309,12 +402,19 @@ function App() {
           ))}
         </div>
       </section>
+
+      <footer className="pageFooter">
+        <p className="footerText">
+          <span className="footerPoweredBy">Powered by </span>
+          <span className="footerBrand">Golpo AI</span>
+        </p>
+      </footer>
     </div>
 
     {/* Settings Modal */}
     {showSettingsModal && (
       <div className="modalOverlay" onClick={() => setShowSettingsModal(false)}>
-        <div className="modalContent" onClick={(e) => e.stopPropagation()}>
+        <div className="modalContent settingsModalContent" onClick={(e) => e.stopPropagation()}>
           <div className="modalHeader">
             <div>
               <h3 className="modalTitle">Configure Golpo AI API Key</h3>
@@ -403,6 +503,85 @@ function App() {
                   : 'Save API Key'}
               </button>
             </div>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* Credits Modal */}
+    {showCreditsModal && (
+      <div className="modalOverlay" onClick={() => setShowCreditsModal(false)}>
+        <div className="modalContent" onClick={(e) => e.stopPropagation()}>
+          <div className="modalHeader">
+            <h2 className="modalTitle">Credits Management</h2>
+            <button
+              className="modalCloseButton"
+              onClick={() => setShowCreditsModal(false)}
+              aria-label="Close modal"
+            >
+              ×
+            </button>
+          </div>
+          <div className="modalBody">
+            <div className="creditsUsageHeader">
+              <h3 className="creditsUsageTitle">Credits Information</h3>
+              <button
+                className="creditsRefreshButton"
+                onClick={handleRefreshCredits}
+                disabled={isLoadingCredits}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="23 4 23 10 17 10"></polyline>
+                  <polyline points="1 20 1 14 7 14"></polyline>
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                </svg>
+                Refresh
+              </button>
+            </div>
+            
+            {isLoadingCredits ? (
+              <div className="creditsLoadingState">
+                <div className="creditsSpinner"></div>
+                <div>Loading credits information...</div>
+              </div>
+            ) : creditsError ? (
+              <div style={{
+                padding: '12px',
+                marginBottom: '16px',
+                background: '#fff4e5',
+                border: '1px solid #ffab00',
+                borderRadius: '6px',
+                color: '#172b4d',
+                fontSize: '13px'
+              }}>
+                {creditsError}
+              </div>
+            ) : (creditsList.length > 0 || creditsData) ? (
+              <div className="creditsTableContainer">
+                <table className="creditsTable">
+                  <thead>
+                    <tr className="creditsTableHeaderRow">
+                      <th className="creditsTableHeader" style={{ minWidth: '200px' }}>API Key</th>
+                      <th className="creditsTableHeader" style={{ minWidth: '150px' }}>Credits Usage</th>
+                      <th className="creditsTableHeader" style={{ minWidth: '150px' }}>Current Credits</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(creditsList.length > 0 ? creditsList : [creditsData]).map((item, index) => (
+                      <tr key={index} className="creditsTableDataRow">
+                        <td className="creditsTableCell" style={{ fontFamily: 'monospace', fontSize: '13px' }}>{item.apiKey}</td>
+                        <td className="creditsTableCell creditsUsage">{typeof item.creditsUsage === 'number' ? item.creditsUsage.toFixed(2) : item.creditsUsage || '0.00'}</td>
+                        <td className="creditsTableCell creditsCurrent">{typeof item.currentCredits === 'number' ? item.currentCredits.toFixed(2) : item.currentCredits || '0.00'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="creditsEmptyState">
+                No credits information available
+              </div>
+            )}
           </div>
         </div>
       </div>
