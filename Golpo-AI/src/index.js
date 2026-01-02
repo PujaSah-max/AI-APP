@@ -1165,6 +1165,43 @@ resolver.define('getVideoStatus', async ({ payload }) => {
     throw new Error('Job id is required to check video status.');
   }
 
+  // Check if job has timed out (more than 1 hour old)
+  try {
+    const jobKey = `video-job-${jobId}`;
+    const jobData = await storage.get(jobKey);
+    
+    if (jobData && jobData.createdAt) {
+      const createdAt = new Date(jobData.createdAt);
+      const now = new Date();
+      const hoursElapsed = (now - createdAt) / (1000 * 60 * 60); // Convert to hours
+      
+      if (hoursElapsed >= 1) {
+        console.log('[resolver:getVideoStatus] Job has timed out:', {
+          jobId,
+          createdAt: jobData.createdAt,
+          hoursElapsed: hoursElapsed.toFixed(2),
+          timeoutThreshold: 1
+        });
+        
+        // Return timeout status
+        return {
+          status: 200,
+          statusText: 'OK',
+          body: {
+            status: 'timeout',
+            job_status: 'timeout',
+            state: 'timeout',
+            message: 'Video generation has exceeded the maximum time limit of 1 hour. Please try regenerating the video.',
+            error: 'Video generation timeout'
+          }
+        };
+      }
+    }
+  } catch (timeoutCheckError) {
+    console.warn('[resolver:getVideoStatus] Failed to check job timeout, continuing with API call:', timeoutCheckError);
+    // Continue with normal API call if timeout check fails
+  }
+
   // Get admin API key (configured in global page)
   const API_KEY = await getUserApiKeyInternal();
 
@@ -1216,6 +1253,129 @@ resolver.define('getVideoStatus', async ({ payload }) => {
       jobId: payload?.jobId
     });
     throw new Error(`Failed to fetch video status: ${errorMessage}`);
+  }
+});
+
+// Cancel a video job (best-effort) - attempts to cancel at provider and marks job cancelled locally
+resolver.define('cancelVideoJob', async ({ payload, context }) => {
+  try {
+    const { jobId, accountId } = payload ?? {};
+
+    if (!jobId || typeof jobId !== 'string') {
+      throw new Error('Job id is required to cancel video job.');
+    }
+
+    // Load job data from storage
+    const jobKey = `video-job-${jobId}`;
+    const jobData = await storage.get(jobKey);
+
+    if (!jobData) {
+      console.warn('[resolver:cancelVideoJob] Job not found in storage:', jobId);
+      // Still attempt provider cancellation as a best-effort using API key
+    }
+
+    // Permission check: allow if caller is admin or accountId matches requestedBy.accountId
+    const isAdmin = await checkAdminAccess();
+    if (!isAdmin) {
+      // If no accountId provided, try to proceed as server (best-effort) but log warning
+      if (!accountId && jobData?.requestedBy?.accountId) {
+        console.warn('[resolver:cancelVideoJob] No accountId provided by caller, proceeding as app');
+      } else if (accountId && jobData && jobData.requestedBy && jobData.requestedBy.accountId && accountId !== jobData.requestedBy.accountId) {
+        throw new Error('Unauthorized: only the job owner or an admin may cancel this job');
+      }
+    }
+
+    // Get API key
+    const API_KEY = await getUserApiKeyInternal();
+    let providerCancelled = false;
+    let providerResponse = null;
+
+    if (API_KEY) {
+      // Try a few plausible provider endpoints for cancellation (best-effort)
+      const tryUrls = [
+        `${GOLPO_API_BASE_URL}/api/v1/videos/${jobId}`,
+        `${GOLPO_API_BASE_URL}/api/v1/videos/cancel`,
+        `${GOLPO_API_BASE_URL}/api/v1/videos/${jobId}/cancel`
+      ];
+
+      for (const url of tryUrls) {
+        try {
+          // Prefer DELETE for direct resource removal, fallback to POST with body
+          let resp;
+          if (url.endsWith(`/${jobId}`)) {
+            resp = await fetchWithTimeout(url, {
+              method: 'DELETE',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': API_KEY
+              }
+            }, 20000);
+          } else {
+            resp = await fetchWithTimeout(url, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': API_KEY
+              },
+              body: JSON.stringify({ job_id: jobId })
+            }, 20000);
+          }
+
+          providerResponse = resp;
+          if (resp && (resp.ok || resp.status === 202 || resp.status === 204)) {
+            providerCancelled = true;
+            console.log('[resolver:cancelVideoJob] Provider reported cancel success for job:', jobId, 'via', url);
+            break;
+          } else {
+            console.warn('[resolver:cancelVideoJob] Provider cancel attempt returned non-OK:', url, resp && resp.status);
+            // continue trying other endpoints
+          }
+        } catch (err) {
+          console.warn('[resolver:cancelVideoJob] Provider cancel attempt failed for', url, err && err.message);
+          // try next
+        }
+      }
+    } else {
+      console.warn('[resolver:cancelVideoJob] No API key available for provider cancel - will mark job cancelled locally');
+    }
+
+    // Remove job from active list and storage (or mark cancelled)
+    try {
+      const activeJobsKey = 'active-video-jobs';
+      const activeJobs = await storage.get(activeJobsKey) || [];
+      const updatedJobs = activeJobs.filter(id => id !== jobId);
+      await storage.set(activeJobsKey, updatedJobs);
+
+      // Delete job entry if present
+      try {
+        await storage.delete(jobKey);
+        console.log('[resolver:cancelVideoJob] Deleted job storage key:', jobKey);
+      } catch (delErr) {
+        console.warn('[resolver:cancelVideoJob] Failed to delete job storage key, attempting to mark cancelled:', delErr);
+        if (jobData) {
+          jobData.status = 'cancelled';
+          jobData.cancelledAt = new Date().toISOString();
+          try {
+            await storage.set(jobKey, jobData);
+            console.log('[resolver:cancelVideoJob] Marked job cancelled in storage:', jobKey);
+          } catch (setErr) {
+            console.warn('[resolver:cancelVideoJob] Failed to mark job cancelled in storage:', setErr);
+          }
+        }
+      }
+    } catch (cleanupErr) {
+      console.warn('[resolver:cancelVideoJob] Failed to cleanup job from storage/active list:', cleanupErr);
+    }
+
+    return {
+      success: true,
+      canceled: providerCancelled,
+      providerStatus: providerResponse ? (providerResponse.status || null) : null,
+      message: providerCancelled ? 'Cancelled at provider' : 'Marked cancelled locally (best-effort)'
+    };
+  } catch (error) {
+    console.error('[resolver:cancelVideoJob] Error:', error);
+    return { success: false, error: error?.message || 'Unknown error' };
   }
 });
 

@@ -713,9 +713,12 @@ function App() {
   const videoStatusTimerRef = useRef(null);
   const previousLatestUrlRef = useRef(null);
   const completionCheckIntervalRef = useRef(null);
+  const videoGenerationStartRef = useRef(null); // Timestamp when generation started
   const videoObjectUrlRef = useRef(null);
   const videoElementRef = useRef(null);
   const fullscreenVideoRef = useRef(null);
+  const [showVideoFailureModal, setShowVideoFailureModal] = useState(false);
+  const [videoFailureMessage, setVideoFailureMessage] = useState("");
   const [isFullscreenVideo, setIsFullscreenVideo] = useState(false);
 
   // Fetch current Confluence user info for attribution (runs as the user via bridge)
@@ -1773,7 +1776,7 @@ function App() {
   const isFailureStatus = (status) => {
     const normalized = normalizeStatus(status);
     if (!normalized) return false;
-    const keywords = ["failed", "error", "cancelled", "denied", "rejected"];
+    const keywords = ["failed", "error", "cancelled", "denied", "rejected", "timeout"];
     return keywords.some((keyword) => normalized.includes(keyword));
   };
 
@@ -1886,6 +1889,15 @@ function App() {
             status: "processing"
           });
           setVideoJobId(storedJobId);
+          // Restore stored start timestamp for timeout checks
+          try {
+            const storedTs = localStorage.getItem('golpo_video_job_start_ts');
+            if (storedTs) {
+              videoGenerationStartRef.current = parseInt(storedTs, 10);
+            }
+          } catch (e) {
+            console.warn('[GolpoAI] Failed to restore video generation start timestamp:', e);
+          }
           setIsGeneratingVideo(true);
           setVideoStatusMessage("Processing");
           
@@ -1902,6 +1914,39 @@ function App() {
               if (!statusPayload) {
                 console.log("[GolpoAI] No status response received");
                 return;
+              }
+
+              // Check for generation timeout (> 1 hour)
+              try {
+                const startTs = videoGenerationStartRef.current || (localStorage.getItem('golpo_video_job_start_ts') ? parseInt(localStorage.getItem('golpo_video_job_start_ts'), 10) : null);
+                if (startTs && Date.now() - startTs > 3600000) {
+                  console.log("[GolpoAI] Video generation timed out (over 1 hour) for job:", storedJobId);
+                  if (completionCheckIntervalRef.current) {
+                    clearInterval(completionCheckIntervalRef.current);
+                    completionCheckIntervalRef.current = null;
+                  }
+                  setVideoGenerationResult(null);
+                  setIsGeneratingVideo(false);
+                  setVideoStatusMessage("Status: Failed (timeout)");
+                  try {
+                    localStorage.removeItem('golpo_video_job_id');
+                    localStorage.removeItem('golpo_video_page_id');
+                    localStorage.removeItem('golpo_video_job_start_ts');
+                  } catch (e) {}
+                  // Attempt to cancel the job on the server (best-effort)
+                  try {
+                    await safeInvoke('cancelVideoJob', { jobId: storedJobId, accountId: currentUser?.accountId || null });
+                    console.log('[GolpoAI] Cancel request sent for timed-out job', storedJobId);
+                  } catch (cancelErr) {
+                    console.warn('[GolpoAI] Cancel request failed for timed-out job', cancelErr);
+                  }
+
+                  setVideoFailureMessage("Video generation failed: the generation has taken longer than 1 hour. You can try regenerating the video.");
+                  setShowVideoFailureModal(true);
+                  return;
+                }
+              } catch (e) {
+                console.warn('[GolpoAI] Timeout check failed:', e);
               }
               
               // Extract status from response
@@ -2300,7 +2345,17 @@ function App() {
           clearVideoStatusTimer();
           setIsGeneratingVideo(false);
           setIsPollingVideoStatus(false);
-          setError("Video generation failed. Please try again.");
+          
+          // Check if it's a timeout status
+          const isTimeout = status && normalizeStatus(status).includes("timeout");
+          if (isTimeout) {
+            // Close generation modal (isGeneratingVideo is already set to false) and show failure modal
+            setVideoFailureMessage(statusPayload?.message || statusPayload?.body?.message || "Video generation has taken longer than 1 hour and has timed out. Please try regenerating the video.");
+            setShowVideoFailureModal(true);
+          } else {
+            // For other failures, show error message
+            setError("Video generation failed. Please try again.");
+          }
           return;
         }
 
@@ -2315,7 +2370,7 @@ function App() {
         }, VIDEO_STATUS_POLL_INTERVAL);
       }
     },
-    [clearVideoStatusTimer, handleVideoReady, safeInvoke, isOnCorrectPage]
+    [clearVideoStatusTimer, handleVideoReady, safeInvoke, isOnCorrectPage, normalizeStatus, setShowVideoFailureModal, setVideoFailureMessage]
   );
 
   const startVideoStatusPolling = useCallback(
@@ -2995,6 +3050,15 @@ function App() {
                       status: "processing"
                     });
                     setVideoJobId(storedJobId);
+                    // Restore stored start timestamp for timeout checks
+                    try {
+                      const storedTs = localStorage.getItem('golpo_video_job_start_ts');
+                      if (storedTs) {
+                        videoGenerationStartRef.current = parseInt(storedTs, 10);
+                      }
+                    } catch (e) {
+                      console.warn('[GolpoAI] Failed to restore video generation start timestamp:', e);
+                    }
                     setIsGeneratingVideo(true);
                     setVideoStatusMessage("Status: Processing - Video generation in progress...");
                     
@@ -3019,6 +3083,39 @@ function App() {
                                       statusPayload?.job_status || 
                                       statusPayload?.state || 
                                       "";
+
+                          // Check for generation timeout (> 1 hour)
+                          try {
+                            const startTs = videoGenerationStartRef.current || (localStorage.getItem('golpo_video_job_start_ts') ? parseInt(localStorage.getItem('golpo_video_job_start_ts'), 10) : null);
+                            if (startTs && Date.now() - startTs > 3600000) {
+                              console.log("[GolpoAI] Video generation timed out (over 1 hour) for job:", currentJobId);
+                              if (completionCheckIntervalRef.current) {
+                                clearInterval(completionCheckIntervalRef.current);
+                                completionCheckIntervalRef.current = null;
+                              }
+                              setVideoGenerationResult(null);
+                              setIsGeneratingVideo(false);
+                              setVideoStatusMessage("Status: Failed (timeout)");
+                              try {
+                                localStorage.removeItem('golpo_video_job_id');
+                                localStorage.removeItem('golpo_video_page_id');
+                                localStorage.removeItem('golpo_video_job_start_ts');
+                              } catch (e) {}
+                              // Attempt server-side cancellation (best-effort)
+                              try {
+                                await safeInvoke('cancelVideoJob', { jobId: currentJobId, accountId: currentUser?.accountId || null });
+                                console.log('[GolpoAI] Cancel request sent for timed-out job', currentJobId);
+                              } catch (cancelErr) {
+                                console.warn('[GolpoAI] Cancel request failed for timed-out job', cancelErr);
+                              }
+
+                              setVideoFailureMessage("Video generation failed: the generation has taken longer than 1 hour. You can try regenerating the video.");
+                              setShowVideoFailureModal(true);
+                              return;
+                            }
+                          } catch (e) {
+                            console.warn('[GolpoAI] Timeout check failed:', e);
+                          }
                         
                         console.log("[GolpoAI] Video status check:", status);
                         
@@ -3596,6 +3693,14 @@ function App() {
         // Job ID returned - backend will poll in background
         console.log("[GolpoAI] handleGenerateVideo: Job id detected, backend will poll in background", generatedJobId);
         setVideoJobId(generatedJobId);
+        // Record generation start timestamp for timeout detection
+        try {
+          const nowTs = Date.now();
+          videoGenerationStartRef.current = nowTs;
+          localStorage.setItem('golpo_video_job_start_ts', nowTs.toString());
+        } catch (e) {
+          console.warn('[GolpoAI] Failed to store video generation start timestamp:', e);
+        }
         // Keep loading state visible to show video is being generated
         setIsGeneratingVideo(true);
         setVideoStatusMessage("Status: Processing - Video generation in progress...");
@@ -4585,6 +4690,125 @@ function App() {
                   }}
                 >
                   OK
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showVideoFailureModal && (
+        <div style={styles.videoReadyOverlay}>
+          <div style={styles.videoReadyCard}>
+            <button
+              onClick={() => {
+                setShowVideoFailureModal(false);
+                setVideoFailureMessage("");
+                clearCompletionCheckInterval();
+              }}
+              style={styles.modalCloseButton}
+              title="Close"
+            >
+              ×
+            </button>
+            <div style={styles.modalHeader}>
+              <div style={styles.modalIconWrapper}>
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
+                  <rect x="2" y="4" width="14" height="12" rx="3" stroke="#FF4D6D" strokeWidth="2" />
+                  <path d="M16 10L21 6V18L16 14" stroke="#FF4D6D" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </div>
+              <h2 style={styles.modalTitle}>Video generation failed</h2>
+            </div>
+            <div style={styles.modalBody}>
+              <p style={{ marginBottom: 12, color: "#475569", lineHeight: 1.6 }}>
+                {videoFailureMessage || 'The video generation failed or timed out. You can try regenerating the video.'}
+              </p>
+              <div style={styles.modalActions}>
+                <button
+                  style={styles.modalPrimaryButton}
+                  onClick={async () => {
+                    setShowVideoFailureModal(false);
+                    setVideoFailureMessage("");
+                    // Attempt to regenerate
+                    try {
+                      await handleGenerateVideo();
+                    } catch (err) {
+                      console.error('[GolpoAI] Regenerate after failure failed:', err);
+                      setError('Regeneration failed. Please try again.');
+                    }
+                  }}
+                >
+                  Regenerate
+                </button>
+                <button
+                  style={styles.modalSecondaryButton}
+                  onClick={() => {
+                    setShowVideoFailureModal(false);
+                    setVideoFailureMessage("");
+                    clearCompletionCheckInterval();
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showVideoFailureModal && (
+        <div style={styles.videoReadyOverlay}>
+          <div style={styles.videoReadyCard}>
+            <button
+              onClick={() => {
+                setShowVideoFailureModal(false);
+                setVideoFailureMessage("");
+                clearCompletionCheckInterval();
+              }}
+              style={styles.modalCloseButton}
+              title="Close"
+            >
+              ×
+            </button>
+            <div style={styles.modalHeader}>
+              <div style={styles.modalIconWrapper}>
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
+                  <rect x="2" y="4" width="14" height="12" rx="3" stroke="#FF4D6D" strokeWidth="2" />
+                  <path d="M16 10L21 6V18L16 14" stroke="#FF4D6D" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </div>
+              <h2 style={styles.modalTitle}>Video generation failed</h2>
+            </div>
+            <div style={styles.modalBody}>
+              <p style={{ marginBottom: 12, color: "#475569", lineHeight: 1.6 }}>{videoFailureMessage || "Video generation has taken longer than expected and was stopped."}</p>
+              <div style={styles.modalActions}>
+                <button
+                  style={styles.modalPrimaryButton}
+                  onClick={async () => {
+                    setShowVideoFailureModal(false);
+                    setVideoFailureMessage("");
+                    clearCompletionCheckInterval();
+                    // Attempt to regenerate
+                    try {
+                      await handleGenerateVideo();
+                    } catch (err) {
+                      console.error('[GolpoAI] Regenerate failed:', err);
+                      setError(err?.message || 'Failed to start regeneration.');
+                    }
+                  }}
+                >
+                  Regenerate
+                </button>
+                <button
+                  style={styles.modalSecondaryButton}
+                  onClick={() => {
+                    setShowVideoFailureModal(false);
+                    setVideoFailureMessage("");
+                    clearCompletionCheckInterval();
+                  }}
+                >
+                  Close
                 </button>
               </div>
             </div>
