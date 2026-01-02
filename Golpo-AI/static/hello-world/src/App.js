@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke, view, getContext, requestConfluence } from "@forge/bridge";
-import golpoIcon from "./static/golpo-logo.png";
+import golpoIcon from "./static/GOLPO_ICON_1.png";
 import SparklesIcon from "./components/SparklesIcon";
 
 const APP_TITLE = "Golpo AI";

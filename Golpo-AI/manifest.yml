@@ -36,7 +36,8 @@ modules:
 
   confluence:globalPage:
     - key: golpo-ai-getting-started
-      title: Golpo AI - Getting Started
+      title: Golpo AI 
+      icon: resource:global-page;GOLPO_ICON_1.png
       route: getting-started
       resource: global-page
       resolver:
