@@ -1410,41 +1410,99 @@ resolver.define('getVideoStatus', async ({ payload }) => {
     throw new Error('Job id is required to check video status.');
   }
 
-  // Check if job has timed out (more than 1 hour old)
+  // Stop long-running generations: if a job is older than 1 hour, cancel it (best-effort) and return timeout.
+  // This is the "source of truth" used by the frontend to show the failure popup.
+  const TIMEOUT_MS = 60 * 60 * 1000; // 1 hour
+  const TIMEOUT_LABEL = '1 hour';
+
+  // Best-effort: cancel provider job
+  const cancelProviderJob = async (apiKey, id) => {
+    if (!apiKey) return false;
+
+    const tryUrls = [
+      `${GOLPO_API_BASE_URL}/api/v1/videos/${id}`,
+      `${GOLPO_API_BASE_URL}/api/v1/videos/cancel`,
+      `${GOLPO_API_BASE_URL}/api/v1/videos/${id}/cancel`
+    ];
+
+    for (const url of tryUrls) {
+      try {
+        let resp;
+        if (url.endsWith(`/${id}`)) {
+          resp = await fetchWithTimeout(url, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey }
+          }, 20000);
+        } else {
+          resp = await fetchWithTimeout(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+            body: JSON.stringify({ job_id: id })
+          }, 20000);
+        }
+
+        if (resp && (resp.ok || resp.status === 202 || resp.status === 204)) {
+          console.log('[resolver:getVideoStatus] Provider cancel success for job:', id, 'via', url);
+          return true;
+        }
+      } catch (e) {
+        // continue
+      }
+    }
+    return false;
+  };
+
+  const buildTimeoutResponse = () => ({
+    status: 200,
+    statusText: 'OK',
+    body: {
+      status: 'timeout',
+      job_status: 'timeout',
+      state: 'timeout',
+      message: `Video generation took longer than ${TIMEOUT_LABEL} and was stopped. Please regenerate.`,
+      error: 'Video generation timeout'
+    }
+  });
+
   try {
     const jobKey = `video-job-${jobId}`;
     const jobData = await storage.get(jobKey);
-    
+
     if (jobData && jobData.createdAt) {
-      const createdAt = new Date(jobData.createdAt);
-      const now = new Date();
-      const hoursElapsed = (now - createdAt) / (1000 * 60 * 60); // Convert to hours
-      
-      if (hoursElapsed >= 1) {
-        console.log('[resolver:getVideoStatus] Job has timed out:', {
-          jobId,
-          createdAt: jobData.createdAt,
-          hoursElapsed: hoursElapsed.toFixed(2),
-          timeoutThreshold: 1
-        });
-        
-        // Return timeout status
-        return {
-          status: 200,
-          statusText: 'OK',
-          body: {
-            status: 'timeout',
-            job_status: 'timeout',
-            state: 'timeout',
-            message: 'Video generation has exceeded the maximum time limit of 1 hour. Please try regenerating the video.',
-            error: 'Video generation timeout'
-          }
-        };
+      const createdAt = new Date(jobData.createdAt).getTime();
+      const elapsedMs = Date.now() - createdAt;
+
+      if (Number.isFinite(elapsedMs) && elapsedMs >= TIMEOUT_MS) {
+        console.log('[resolver:getVideoStatus] Job timed out, stopping generation:', { jobId, elapsedMs, timeoutMs: TIMEOUT_MS });
+
+        // Get API key for cancellation attempt
+        let apiKey = null;
+        try {
+          apiKey = await getUserApiKeyInternal();
+        } catch (e) {}
+
+        // Best-effort cancel at provider
+        try {
+          await cancelProviderJob(apiKey, jobId);
+        } catch (e) {}
+
+        // Remove job from active list & storage so background polling stops
+        try {
+          const activeJobsKey = 'active-video-jobs';
+          const activeJobs = await storage.get(activeJobsKey) || [];
+          const updatedJobs = activeJobs.filter(id => id !== jobId);
+          await storage.set(activeJobsKey, updatedJobs);
+        } catch (e) {}
+
+        try {
+          await storage.delete(jobKey);
+        } catch (e) {}
+
+        return buildTimeoutResponse();
       }
     }
-  } catch (timeoutCheckError) {
-    console.warn('[resolver:getVideoStatus] Failed to check job timeout, continuing with API call:', timeoutCheckError);
-    // Continue with normal API call if timeout check fails
+  } catch (e) {
+    // If timeout check fails, fall back to provider status below.
   }
 
   // Get admin API key (configured in global page)
@@ -2219,7 +2277,7 @@ resolver.define('fetchVideoChunk', async ({ payload }) => {
 // Add video URL as a footer comment to the Confluence page
 resolver.define('addVideoCommentToPage', async ({ payload }) => {
   try {
-  const { pageId, videoUrl, commentBodyHtml } = payload ?? {};
+  const { pageId, videoUrl } = payload ?? {};
 
     if (!pageId || typeof pageId !== 'string') {
     throw new Error('Page id is required to add footer comment.');
@@ -2229,12 +2287,11 @@ resolver.define('addVideoCommentToPage', async ({ payload }) => {
     throw new Error('Video URL is required to add footer comment.');
   }
 
-    if (!commentBodyHtml || typeof commentBodyHtml !== 'string') {
-    throw new Error('Comment body HTML is required to add footer comment.');
-  }
-
-  // Use the comment body HTML provided by frontend
-  const commentBody = commentBodyHtml;
+  // IMPORTANT: Use Confluence "storage" (HTML) here because it has proven to be the most reliable
+  // format across sites/endpoints and is what "worked fine before".
+  const representation = 'storage';
+  const generatedByName = await fetchCurrentUserDisplayName(api.asUser());
+  const value = buildFooterCommentStorageHtml(videoUrl, generatedByName);
 
   console.log('[resolver:addVideoCommentToPage] Adding footer comment to page', pageId, 'with video URL:', videoUrl);
 
@@ -2250,25 +2307,25 @@ resolver.define('addVideoCommentToPage', async ({ payload }) => {
         body: JSON.stringify({
           pageId: pageId,
           body: {
-            representation: 'storage',
-            value: commentBody
+            representation,
+            value
           }
         })
       }
     );
 
     if (!response.ok) {
-        let errorBody = 'Unable to read error body';
-        try {
-          errorBody = await response.text();
-        } catch (e) {
-          console.warn('[addVideoCommentToPage] Failed to read error body:', e);
-        }
+      let errorBody = 'Unable to read error body';
+      try {
+        errorBody = await response.text();
+      } catch (e) {
+        console.warn('[addVideoCommentToPage] Failed to read error body:', e);
+      }
       console.error('[resolver:addVideoCommentToPage] Failed to create footer comment', {
         pageId,
         status: response.status,
         statusText: response.statusText,
-          errorBody: errorBody.substring(0, 500)
+        errorBody: errorBody.substring(0, 500)
       });
       throw new Error(`Unable to add footer comment to page ${pageId}. Status: ${response.status} ${response.statusText}`);
     }
@@ -2281,7 +2338,7 @@ resolver.define('addVideoCommentToPage', async ({ payload }) => {
         throw new Error(`Invalid response format from Confluence API`);
       }
       
-    console.log('[resolver:addVideoCommentToPage] Footer comment created successfully:', JSON.stringify(commentData, null, 2));
+    console.log('[resolver:addVideoCommentToPage] Footer comment created successfully (ADF):', JSON.stringify(commentData, null, 2));
 
     return {
       status: response.status,
@@ -2367,7 +2424,8 @@ const isVideoFailed = (statusData) => {
          statusLower === 'error' || 
          statusLower === 'cancelled' || 
          statusLower === 'denied' || 
-         statusLower === 'rejected';
+         statusLower === 'rejected' ||
+         statusLower === 'timeout';
 };
 
 // Helper function to fetch user info by accountId from Confluence API
@@ -2435,23 +2493,103 @@ const fetchUserByAccountId = async (accountId, useAsApp = false) => {
   }
 };
 
-// Helper function to build comment HTML for video URL
-// Confluence footer comment: just the video link, no "Generated by" line
-const buildCommentBodyHtml = async (videoUrl, requestedBy, useAsApp = false) => {
-  console.log('[buildCommentBodyHtml] Input (link only, no attribution):', {
+// Helper function to build comment body in ADF (atlas_doc_format).
+// Using ADF avoids Confluence showing the "legacy/unsupported content" warning banner.
+// Also: do NOT display the raw URL text in the comment.
+const buildCommentBodyAdf = async (videoUrl, requestedBy, useAsApp = false) => {
+  console.log('[buildCommentBodyAdf] Input:', {
     videoUrl,
     requestedBy: requestedBy ? JSON.stringify(requestedBy, null, 2) : 'null',
     useAsApp,
   });
 
-  const finalHtml = `<p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>`;
-  console.log('[buildCommentBodyHtml] Final HTML:', finalHtml);
-  return finalHtml;
+  const href = String(videoUrl || '');
+
+  // Minimal ADF: friendly message + link text "▶ Play video"
+  const adf = {
+    version: 1,
+    type: 'doc',
+    content: [
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: 'Video generated. Click the button below to play.' }
+        ]
+      },
+      {
+        type: 'paragraph',
+        content: [
+          {
+            type: 'text',
+            text: '▶ Play video',
+            marks: [
+              {
+                type: 'link',
+                attrs: { href }
+              }
+            ]
+          },
+        ]
+      }
+    ]
+  };
+
+  console.log('[buildCommentBodyAdf] Final ADF:', JSON.stringify(adf));
+  return adf;
+};
+
+// Helper function to build footer comment body in Confluence Storage format (HTML).
+// This is used as a fallback when atlas_doc_format (ADF) is rejected by Confluence.
+// IMPORTANT: Avoid showing raw URL text; render a friendly message + a link.
+const buildFooterCommentStorageHtml = (videoUrl, generatedByName = null) => {
+  const escapeHtml = (input) =>
+    String(input ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
+  const safeUrl = escapeHtml(videoUrl || '');
+  const safeGeneratedBy = generatedByName ? escapeHtml(generatedByName) : '';
+  // Use HTML entity for the play symbol to avoid encoding issues rendering as "???".
+  const playText = '&#9658; Play video';
+  const generatedByLine = safeGeneratedBy
+    ? `<p style="margin-top: 12px; margin-bottom: 0;"><strong>Generated by:</strong> ${safeGeneratedBy}</p>`
+    : '';
+
+  return `<p><strong>Video generated.</strong> Click the button below to play.</p>
+<p><a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${playText}</a></p>${generatedByLine}`;
+};
+
+// Best-effort helper to get the current user's display name (for footer comment attribution).
+// Uses v2 first, then falls back to v1.
+const fetchCurrentUserDisplayName = async (apiCall) => {
+  try {
+    let meResponse = await apiCall.requestConfluence(route`/wiki/api/v2/users/me`);
+    if (!meResponse.ok) {
+      try {
+        meResponse = await apiCall.requestConfluence(route`/wiki/rest/api/user/current`);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (!meResponse?.ok) {
+      return null;
+    }
+
+    const me = await meResponse.json();
+    return me?.displayName || me?.publicName || me?.name || null;
+  } catch (e) {
+    return null;
+  }
 };
 
 // Helper function to build video section HTML for page content
 const buildVideoSectionHtml = (videoUrl) => {
-  return `<h2>Golpo AI Generated Video</h2><p><a href="${videoUrl}" target="_blank" rel="noopener noreferrer">${videoUrl}</a></p>`;
+  const safeUrl = String(videoUrl || '').replace(/"/g, '&quot;');
+  return `<h2>Golpo AI Generated Video</h2><p><strong>Video generated.</strong> Click to play.</p><p><a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:10px 14px;background:#0052CC;color:#FFFFFF;border-radius:8px;text-decoration:none;font-weight:600;">▶ Play video</a></p>`;
 };
 
 // Process completed video: add to comments only (not page content)
@@ -2473,10 +2611,15 @@ const processCompletedVideo = async (jobId, videoUrl, pageId, useAsApp = false, 
       } : null,
     });
     
-    // Log the comment HTML that will be generated
-    // buildCommentBodyHtml is now async and can fetch username from accountId
-    const commentBodyHtml = await buildCommentBodyHtml(videoUrl, requestedBy, useAsApp);
-    console.log('[processCompletedVideo] Generated comment HTML:', commentBodyHtml);
+    // IMPORTANT: Use Confluence "storage" (HTML) for maximum reliability.
+    // This is what "worked fine before" and avoids failures when ADF is rejected.
+    const generatedByName =
+      requestedBy?.displayName ||
+      requestedBy?.publicName ||
+      requestedBy?.name ||
+      requestedBy?.username ||
+      null;
+    const commentBodyStorage = buildFooterCommentStorageHtml(videoUrl, generatedByName);
     console.log('[processCompletedVideo] requestedBy value:', JSON.stringify(requestedBy, null, 2));
 
     // Use asApp() for scheduled triggers, asUser() for resolver calls
@@ -2496,7 +2639,7 @@ const processCompletedVideo = async (jobId, videoUrl, pageId, useAsApp = false, 
             pageId,
             body: {
               representation: 'storage',
-              value: commentBodyHtml
+              value: commentBodyStorage
             }
           })
         }
@@ -2504,7 +2647,7 @@ const processCompletedVideo = async (jobId, videoUrl, pageId, useAsApp = false, 
       
       if (commentResponse.ok) {
         const commentData = await commentResponse.json();
-        console.log('[processCompletedVideo] Successfully added video to footer comments:', JSON.stringify(commentData, null, 2));
+        console.log('[processCompletedVideo] Successfully added video to footer comments (storage):', JSON.stringify(commentData, null, 2));
       } else {
         const errorText = await commentResponse.text();
         console.error('[processCompletedVideo] Failed to add footer comment:', commentResponse.status, errorText);

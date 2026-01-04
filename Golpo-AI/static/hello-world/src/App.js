@@ -6,6 +6,10 @@ import SparklesIcon from "./components/SparklesIcon";
 const APP_TITLE = "Golpo AI";
 const APP_TAGLINE = "Generate engaging videos from your Confluence page";
 
+// TEMP (testing): override credits returned from backend.
+// Set to a number (e.g. 0) to force the low-credits popup; keep null to use real credits.
+const FORCE_TEST_CREDITS = null;
+
 const quickActions = ["Whiteboard explainer video of Confluence page"];
 const durationOptions = [
   { label: "30 sec", minutes: 0.5 },
@@ -652,6 +656,14 @@ function App() {
   const [isVideoTooLarge, setIsVideoTooLarge] = useState(false); // Track if video is too large to play in modal
   const [currentUser, setCurrentUser] = useState(null); // Current Confluence user info for attribution
   const [showVideoPlayerModal, setShowVideoPlayerModal] = useState(false); // Whether to show video player modal
+
+  // Low credits warning modal (does NOT change backend credit logic; only warns before starting generation)
+  const [showLowCreditsModal, setShowLowCreditsModal] = useState(false);
+  const [lowCreditsInfo, setLowCreditsInfo] = useState({
+    currentCredits: null,
+    requiredCredits: null,
+    breakdown: "",
+  });
 
   const maxChars = 500;
 
@@ -1812,6 +1824,28 @@ function App() {
             console.log("[GolpoAI] Current page ID:", pageId, "Stored page ID:", storedPageId);
           } catch (pageError) {
             console.warn("[GolpoAI] Could not get current page ID:", pageError);
+
+            // Fallbacks for pageId detection (important for contentBylineItem / when invoke fails)
+            try {
+              const context = await getContext();
+              const contextPageId = extractPageIdFromContext(context);
+              if (contextPageId) {
+                pageId = contextPageId;
+                setCurrentPageId(pageId);
+                console.log("[GolpoAI] Current page ID (from getContext):", pageId, "Stored page ID:", storedPageId);
+              }
+            } catch (contextErr) {
+              // ignore
+            }
+
+            if (!pageId) {
+              const urlPageId = getPageIdFromUrl();
+              if (urlPageId) {
+                pageId = urlPageId;
+                setCurrentPageId(pageId);
+                console.log("[GolpoAI] Current page ID (from URL):", pageId, "Stored page ID:", storedPageId);
+              }
+            }
           }
           
           // Only restore if we're on the same page where video was generated
@@ -1871,10 +1905,32 @@ function App() {
                 }
                 return;
               } else if (isFailureStatus(status)) {
-                // Video failed - clear localStorage
-                console.log("[GolpoAI] Video generation failed, clearing stored job");
-                localStorage.removeItem('golpo_video_job_id');
-                localStorage.removeItem('golpo_video_page_id');
+                // Video failed (including server-side timeout) - show failure popup and clear localStorage
+                const normalized = normalizeStatus(status);
+                const isTimeout = normalized.includes("timeout");
+
+                console.log("[GolpoAI] Video generation failed during restore. Status:", status, "Timeout:", isTimeout);
+
+                try {
+                  localStorage.removeItem('golpo_video_job_id');
+                  localStorage.removeItem('golpo_video_page_id');
+                  localStorage.removeItem('golpo_video_job_start_ts');
+                } catch (e) {}
+
+                setVideoGenerationResult(null);
+                setIsGeneratingVideo(false);
+                setIsPollingVideoStatus(false);
+                setVideoStatusMessage("");
+
+                // Show failure popup (this is what users expect instead of being stuck on "Generating")
+                setVideoFailureMessage(
+                  statusPayload?.message ||
+                    statusPayload?.body?.message ||
+                    (isTimeout
+                      ? "Video generation failed: it has taken longer than expected. Please try regenerating the video."
+                      : "Video generation failed. Please try regenerating the video.")
+                );
+                setShowVideoFailureModal(true);
                 return;
               }
             }
@@ -1916,38 +1972,8 @@ function App() {
                 return;
               }
 
-              // Check for generation timeout (> 1 hour)
-              try {
-                const startTs = videoGenerationStartRef.current || (localStorage.getItem('golpo_video_job_start_ts') ? parseInt(localStorage.getItem('golpo_video_job_start_ts'), 10) : null);
-                if (startTs && Date.now() - startTs > 3600000) {
-                  console.log("[GolpoAI] Video generation timed out (over 1 hour) for job:", storedJobId);
-                  if (completionCheckIntervalRef.current) {
-                    clearInterval(completionCheckIntervalRef.current);
-                    completionCheckIntervalRef.current = null;
-                  }
-                  setVideoGenerationResult(null);
-                  setIsGeneratingVideo(false);
-                  setVideoStatusMessage("Status: Failed (timeout)");
-                  try {
-                    localStorage.removeItem('golpo_video_job_id');
-                    localStorage.removeItem('golpo_video_page_id');
-                    localStorage.removeItem('golpo_video_job_start_ts');
-                  } catch (e) {}
-                  // Attempt to cancel the job on the server (best-effort)
-                  try {
-                    await safeInvoke('cancelVideoJob', { jobId: storedJobId, accountId: currentUser?.accountId || null });
-                    console.log('[GolpoAI] Cancel request sent for timed-out job', storedJobId);
-                  } catch (cancelErr) {
-                    console.warn('[GolpoAI] Cancel request failed for timed-out job', cancelErr);
-                  }
-
-                  setVideoFailureMessage("Video generation failed: the generation has taken longer than 1 hour. You can try regenerating the video.");
-                  setShowVideoFailureModal(true);
-                  return;
-                }
-              } catch (e) {
-                console.warn('[GolpoAI] Timeout check failed:', e);
-              }
+              // NOTE: Timeout is handled server-side via getVideoStatus returning status: "timeout".
+              // We intentionally do not do a separate client-side 1h timer here to avoid conflicting behaviour.
               
               // Extract status from response
               const status = statusPayload?.status || 
@@ -2007,9 +2033,25 @@ function App() {
                 
                 setVideoGenerationResult(null);
                 setIsGeneratingVideo(false);
-                setVideoStatusMessage("Status: Failed");
-                localStorage.removeItem('golpo_video_job_id');
-                localStorage.removeItem('golpo_video_page_id');
+                setIsPollingVideoStatus(false);
+                setVideoStatusMessage("");
+
+                try {
+                  localStorage.removeItem('golpo_video_job_id');
+                  localStorage.removeItem('golpo_video_page_id');
+                  localStorage.removeItem('golpo_video_job_start_ts');
+                } catch (e) {}
+
+                const normalized = normalizeStatus(status);
+                const isTimeout = normalized.includes("timeout");
+                setVideoFailureMessage(
+                  statusPayload?.message ||
+                    statusPayload?.body?.message ||
+                    (isTimeout
+                      ? "Video generation failed: it has taken longer than expected. Please try regenerating the video."
+                      : "Video generation failed. Please try regenerating the video.")
+                );
+                setShowVideoFailureModal(true);
               } else {
                 // Still processing - polling continues in background
                 // Only update UI if modal is still open (not dismissed)
@@ -2048,10 +2090,30 @@ function App() {
   useEffect(() => {
     const getCurrentPageId = async () => {
       try {
-        const pageInfo = await safeInvoke("getCurrentPage", {});
-        const pageId = pageInfo?.id || pageInfo?.pageId || null;
-        setCurrentPageId(pageId);
-        console.log("[GolpoAI] Current page ID set:", pageId);
+        // Prefer resolver (contentAction) but fallback to getContext()/URL (contentBylineItem)
+        let pageId = null;
+        try {
+          const pageInfo = await safeInvoke("getCurrentPage", {});
+          pageId = pageInfo?.id || pageInfo?.pageId || null;
+        } catch (e) {
+          // ignore and fallback below
+        }
+
+        if (!pageId) {
+          try {
+            const context = await getContext();
+            pageId = extractPageIdFromContext(context);
+          } catch (e) {
+            // ignore
+          }
+        }
+
+        if (!pageId) {
+          pageId = getPageIdFromUrl();
+        }
+
+        setCurrentPageId(pageId || null);
+        console.log("[GolpoAI] Current page ID set:", pageId || null);
       } catch (error) {
         console.warn("[GolpoAI] Could not get current page ID:", error);
       }
@@ -2195,10 +2257,26 @@ function App() {
       // Do not set it directly here - only fetch from comments
 
       // Automatically add video URL to page content and as footer comment
-      if (videoUrl && !isBylineItem) {
+      // NOTE: We always *attempt* to add the footer comment for all module types.
+      // Some modules may not have resolver access; those attempts will fail safely (non-blocking).
+      if (videoUrl) {
         try {
-          // Get page ID from various sources
-          const pageId = documentPayload?.id || pages[0]?.id || golpoAIDocument?.pageId;
+          // Get page ID from various sources (most reliable first)
+          let pageId =
+            documentPayload?.id ||
+            currentPageId ||
+            pages?.[0]?.id ||
+            golpoAIDocument?.pageId ||
+            null;
+
+          // Fallback to any stored pageId we persisted when generation started
+          if (!pageId) {
+            try {
+              pageId = localStorage.getItem("golpo_video_page_id");
+            } catch (e) {
+              // ignore
+            }
+          }
 
           if (pageId && pageId !== "unknown" && pageId !== "current") {
             console.log("[GolpoAI] handleVideoReady: Adding video URL to page content for page", pageId);
@@ -2238,7 +2316,7 @@ function App() {
               console.warn("[GolpoAI] handleVideoReady: Failed to add video to page content (non-blocking):", contentError);
             }
 
-            // Also add as footer comment for reference
+            // Also add as footer comment for reference (this is the primary persistent record)
             try {
               await safeInvoke("addVideoCommentToPage", {
                 pageId: pageId,
@@ -2286,19 +2364,21 @@ function App() {
               console.warn("[GolpoAI] handleVideoReady: Failed to add footer comment (non-blocking):", commentError);
               // Still set the video URL directly even if comment creation fails
               setLatestVideoUrl(videoUrl);
+              setCopyUrlMessage("Video generated, but we couldn't add it to page comments automatically.");
+              setTimeout(() => setCopyUrlMessage(""), 4000);
             }
           } else {
             console.warn("[GolpoAI] handleVideoReady: No valid page ID found, skipping video link addition");
+            setCopyUrlMessage("Video generated, but we couldn't detect the page ID to add a comment.");
+            setTimeout(() => setCopyUrlMessage(""), 4000);
           }
         } catch (err) {
           // Don't block the UI if there's an error
           console.warn("[GolpoAI] handleVideoReady: Error attempting to add video link (non-blocking):", err);
         }
-      } else if (isBylineItem) {
-        console.log("[GolpoAI] handleVideoReady: Skipping video link addition (contentBylineItem module)");
       }
     },
-    [clearVideoStatusTimer, videoJobId, prepareVideoSource, documentPayload, pages, golpoAIDocument, isBylineItem, safeInvoke, extractAllVideoUrls]
+    [clearVideoStatusTimer, videoJobId, prepareVideoSource, documentPayload, currentPageId, pages, golpoAIDocument, safeInvoke, extractAllVideoUrls]
   );
 
   const pollVideoStatus = useCallback(
@@ -2318,6 +2398,9 @@ function App() {
           "";
 
         console.log("[GolpoAI] pollVideoStatus response:", statusPayload);
+        console.log("[GolpoAI] pollVideoStatus extracted status:", status);
+        console.log("[GolpoAI] pollVideoStatus isFailureStatus check:", isFailureStatus(status));
+        console.log("[GolpoAI] pollVideoStatus isTimeout check:", status && normalizeStatus(status).includes("timeout"));
 
         // Update status message - show "Status: Processing" for all in-progress states
         if (status) {
@@ -2350,7 +2433,7 @@ function App() {
           const isTimeout = status && normalizeStatus(status).includes("timeout");
           if (isTimeout) {
             // Close generation modal (isGeneratingVideo is already set to false) and show failure modal
-            setVideoFailureMessage(statusPayload?.message || statusPayload?.body?.message || "Video generation has taken longer than 1 hour and has timed out. Please try regenerating the video.");
+            setVideoFailureMessage(statusPayload?.message || statusPayload?.body?.message || "Video generation took longer than 1 hour and was stopped. Please regenerate.");
             setShowVideoFailureModal(true);
           } else {
             // For other failures, show error message
@@ -3084,38 +3167,8 @@ function App() {
                                       statusPayload?.state || 
                                       "";
 
-                          // Check for generation timeout (> 1 hour)
-                          try {
-                            const startTs = videoGenerationStartRef.current || (localStorage.getItem('golpo_video_job_start_ts') ? parseInt(localStorage.getItem('golpo_video_job_start_ts'), 10) : null);
-                            if (startTs && Date.now() - startTs > 3600000) {
-                              console.log("[GolpoAI] Video generation timed out (over 1 hour) for job:", currentJobId);
-                              if (completionCheckIntervalRef.current) {
-                                clearInterval(completionCheckIntervalRef.current);
-                                completionCheckIntervalRef.current = null;
-                              }
-                              setVideoGenerationResult(null);
-                              setIsGeneratingVideo(false);
-                              setVideoStatusMessage("Status: Failed (timeout)");
-                              try {
-                                localStorage.removeItem('golpo_video_job_id');
-                                localStorage.removeItem('golpo_video_page_id');
-                                localStorage.removeItem('golpo_video_job_start_ts');
-                              } catch (e) {}
-                              // Attempt server-side cancellation (best-effort)
-                              try {
-                                await safeInvoke('cancelVideoJob', { jobId: currentJobId, accountId: currentUser?.accountId || null });
-                                console.log('[GolpoAI] Cancel request sent for timed-out job', currentJobId);
-                              } catch (cancelErr) {
-                                console.warn('[GolpoAI] Cancel request failed for timed-out job', cancelErr);
-                              }
-
-                              setVideoFailureMessage("Video generation failed: the generation has taken longer than 1 hour. You can try regenerating the video.");
-                              setShowVideoFailureModal(true);
-                              return;
-                            }
-                          } catch (e) {
-                            console.warn('[GolpoAI] Timeout check failed:', e);
-                          }
+                        // NOTE: Timeout is handled server-side via getVideoStatus returning status: "timeout".
+                        // We intentionally do not do a separate client-side 1h timer here to avoid conflicting behaviour.
                         
                         console.log("[GolpoAI] Video status check:", status);
                         
@@ -3164,9 +3217,25 @@ function App() {
                           
                           setVideoGenerationResult(null);
                           setIsGeneratingVideo(false);
-                          setVideoStatusMessage("Status: Failed");
-                          localStorage.removeItem('golpo_video_job_id');
-                          localStorage.removeItem('golpo_video_page_id');
+                          setIsPollingVideoStatus(false);
+                          setVideoStatusMessage("");
+
+                          try {
+                            localStorage.removeItem('golpo_video_job_id');
+                            localStorage.removeItem('golpo_video_page_id');
+                            localStorage.removeItem('golpo_video_job_start_ts');
+                          } catch (e) {}
+
+                          const normalized = normalizeStatus(status);
+                          const isTimeout = normalized.includes("timeout");
+                          setVideoFailureMessage(
+                            statusPayload?.message ||
+                              statusPayload?.body?.message ||
+                              (isTimeout
+                                ? "Video generation failed: it has taken longer than expected. Please try regenerating the video."
+                                : "Video generation failed. Please try regenerating the video.")
+                          );
+                          setShowVideoFailureModal(true);
                         } else {
                           // Still processing - update status message
                           console.log("[GolpoAI] Video still processing, status:", status);
@@ -3568,6 +3637,50 @@ function App() {
     if (!golpoAIDocument) {
       setError("Document is not ready. Please try again.");
       return;
+    }
+
+    // ---------------------- Low credits warning (UI only) ----------------------
+    // Criteria (per 1 min):
+    // - Script generation only: 0.1
+    // - Video from generated script: 0.9 (plus script 0.1 if script step enabled)
+    // - Video without generating script: 1.0
+    // - Audio without generating script: 0.1
+    // - Audio after generating script: 0.1 (script) + 0.1 (audio) = 0.2
+    //
+    // Current UI flow generates a video directly from document (no script step), so we warn using:
+    // "Generating video without generating script: 1 for 1min".
+    //
+    // IMPORTANT: This does NOT modify backend credit deduction/tracking; it only shows a warning
+    // when current credits are below the estimated requirement.
+    try {
+      const minutes = Number(selectedDurationOption?.minutes || 1);
+
+      // Current mode in this UI:
+      const perMinute = 1.0; // video without generating script
+      const requiredCredits = minutes * perMinute;
+
+      // Fetch current credits from backend (admin key credits)
+      const creditsResponse = await safeInvoke("getCredits", {});
+      const creditsPayload = creditsResponse?.body || creditsResponse;
+      const creditsList = creditsPayload?.credits || [];
+      const firstKey = Array.isArray(creditsList) ? creditsList.find((c) => typeof c?.currentCredits === "number") : null;
+      const currentCredits = firstKey?.currentCredits;
+
+      const effectiveCredits =
+        typeof FORCE_TEST_CREDITS === "number" ? FORCE_TEST_CREDITS : currentCredits;
+
+      if (typeof effectiveCredits === "number" && Number.isFinite(effectiveCredits) && effectiveCredits < requiredCredits) {
+        setLowCreditsInfo({
+          currentCredits: effectiveCredits,
+          requiredCredits,
+          breakdown: `${perMinute} credits / min × ${minutes} min = ${requiredCredits.toFixed(2)} credits`,
+        });
+        setShowLowCreditsModal(true);
+        return;
+      }
+    } catch (creditErr) {
+      // Non-blocking. If credits fetch fails, we continue with existing behavior.
+      console.warn("[GolpoAI] Low credits check failed (non-blocking):", creditErr);
     }
 
     // COMMENTED OUT: Validate duration before generating
@@ -4043,22 +4156,42 @@ function App() {
     latestVideoCard: {
       ...styles.latestVideoCard,
       marginTop: 20,
-      padding: "10px 12px",
+      padding: "10px 14px",
       marginBottom: 16,
       gap: 8,
     },
-    latestVideoSubtitle: {
-      ...styles.latestVideoSubtitle,
-      fontSize: "12px",
-      fontWeight: 500,
-      marginBottom: "8px",
-      lineHeight: 1.4,
+    latestVideoRow: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      flexWrap: "nowrap",
+      whiteSpace: "nowrap",
     },
-    latestVideoUrlLink: {
-      ...styles.latestVideoUrlLink,
-      fontSize: "11px",
-      lineHeight: 1.5,
-      wordBreak: "break-all",
+    latestVideoLabel: {
+      ...styles.latestVideoSubtitle,
+      fontSize: "16px",
+      fontWeight: 700,
+      margin: 0,
+      color: "#111827",
+      whiteSpace: "nowrap",
+    },
+    latestVideoLinkButton: {
+      background: "transparent",
+      border: "none",
+      padding: 0,
+      margin: 0,
+      color: "#0066cc",
+      textDecoration: "underline",
+      cursor: "pointer",
+      fontSize: "16px",
+      fontWeight: 500,
+      lineHeight: 1.2,
+      fontFamily: "inherit",
+      outline: "none",
+      boxShadow: "none",
+      appearance: "none",
+      WebkitAppearance: "none",
+      whiteSpace: "nowrap",
     },
   } : styles;
 
@@ -4102,56 +4235,52 @@ function App() {
 
         {latestVideoUrl && (
           <section style={currentStyles.latestVideoCard}>
-            <p style={currentStyles.latestVideoSubtitle}>Most recent link generated on this page.</p>
-            <a
-              href={latestVideoUrl}
-              style={currentStyles.latestVideoUrlLink}
-              onClick={async (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                
-                console.log("[GolpoAI] ========== Video URL Clicked ==========");
-                console.log("[GolpoAI] Video URL:", latestVideoUrl);
-                
-                if (!requireContentActionForMedia("play the video")) {
-                  console.log("[GolpoAI] Content action required check failed");
-                  return;
-                }
-                
-                console.log("[GolpoAI] Setting loading state and clearing error");
-                setIsLoadingVideo(true);
-                setError("");
-                
-                try {
-                console.log("[GolpoAI] Preparing video for modal playback");
-                  // Set video info for modal playback
-                  const normalizedInfo = {
-                    jobId: null, // We don't have job ID from URL
-                    videoUrl: latestVideoUrl,
-                    downloadUrl: latestVideoUrl,
-                    status: "completed",
-                    raw: { video_url: latestVideoUrl }
-                  };
-                  setVideoReadyInfo(normalizedInfo);
-                  setIsVideoTooLarge(false);
-                  setVideoPlayerUrl(null);
-                  setShowVideoPlayerModal(true);
-                  
-                  // Prepare video source - this will load and play in the modal
-                  await prepareVideoSource(latestVideoUrl);
-                  console.log("[GolpoAI] ✅ Video source prepared successfully for modal playback");
-                } catch (error) {
-                  console.error("[GolpoAI] ❌ ERROR in video URL click handler:", error);
-                  console.error("[GolpoAI] Error message:", error.message);
-                  console.error("[GolpoAI] Error stack:", error.stack);
-                  setIsLoadingVideo(false);
-                  setIsVideoTooLarge(true);
-                  setError(`Failed to load video: ${error.message}`);
-                }
-              }}
-            >
-              {latestVideoUrl}
-            </a>
+            <div style={currentStyles.latestVideoRow}>
+              <span style={currentStyles.latestVideoLabel}>Recently generated video:</span>
+              <button
+                type="button"
+                style={currentStyles.latestVideoLinkButton}
+                onClick={async () => {
+                  console.log("[GolpoAI] ========== Open video clicked (latest video) ==========");
+                  console.log("[GolpoAI] Video URL:", latestVideoUrl);
+
+                  if (!requireContentActionForMedia("play the video")) {
+                    console.log("[GolpoAI] Content action required check failed");
+                    return;
+                  }
+
+                  setIsLoadingVideo(true);
+                  setError("");
+
+                  try {
+                    console.log("[GolpoAI] Preparing video for modal playback");
+                    const normalizedInfo = {
+                      jobId: null, // We don't have job ID from URL
+                      videoUrl: latestVideoUrl,
+                      downloadUrl: latestVideoUrl,
+                      status: "completed",
+                      raw: { video_url: latestVideoUrl },
+                    };
+
+                    setVideoReadyInfo(normalizedInfo);
+                    setIsVideoTooLarge(false);
+                    setVideoPlayerUrl(null);
+                    setShowVideoPlayerModal(true);
+
+                    // Prepare video source - converts to blob and plays inside modal
+                    await prepareVideoSource(latestVideoUrl);
+                    console.log("[GolpoAI] ✅ Video source prepared successfully for modal playback");
+                  } catch (error) {
+                    console.error("[GolpoAI] ❌ ERROR opening latest video in modal:", error);
+                    setIsLoadingVideo(false);
+                    setIsVideoTooLarge(true);
+                    setError(`Failed to load video: ${error.message}`);
+                  }
+                }}
+              >
+                {isLoadingVideo ? "Opening..." : "Open Video"}
+              </button>
+            </div>
           </section>
         )}
 
@@ -4757,14 +4886,12 @@ function App() {
         </div>
       )}
 
-      {showVideoFailureModal && (
+      {showLowCreditsModal && (
         <div style={styles.videoReadyOverlay}>
           <div style={styles.videoReadyCard}>
             <button
               onClick={() => {
-                setShowVideoFailureModal(false);
-                setVideoFailureMessage("");
-                clearCompletionCheckInterval();
+                setShowLowCreditsModal(false);
               }}
               style={styles.modalCloseButton}
               title="Close"
@@ -4774,39 +4901,26 @@ function App() {
             <div style={styles.modalHeader}>
               <div style={styles.modalIconWrapper}>
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
-                  <rect x="2" y="4" width="14" height="12" rx="3" stroke="#FF4D6D" strokeWidth="2" />
-                  <path d="M16 10L21 6V18L16 14" stroke="#FF4D6D" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  <path
+                    d="M12 2L22 20H2L12 2Z"
+                    stroke="#FF4D6D"
+                    strokeWidth="2"
+                    strokeLinejoin="round"
+                  />
+                  <path d="M12 9V13" stroke="#FF4D6D" strokeWidth="2" strokeLinecap="round" />
+                  <path d="M12 17H12.01" stroke="#FF4D6D" strokeWidth="2" strokeLinecap="round" />
                 </svg>
               </div>
-              <h2 style={styles.modalTitle}>Video generation failed</h2>
+              <h2 style={styles.modalTitle}>Low credits</h2>
             </div>
             <div style={styles.modalBody}>
-              <p style={{ marginBottom: 12, color: "#475569", lineHeight: 1.6 }}>{videoFailureMessage || "Video generation has taken longer than expected and was stopped."}</p>
+              <p style={{ marginBottom: 12, color: "#475569", lineHeight: 1.6 }}>
+                You have low credits. Video can&apos;t be generated.
+              </p>
               <div style={styles.modalActions}>
                 <button
-                  style={styles.modalPrimaryButton}
-                  onClick={async () => {
-                    setShowVideoFailureModal(false);
-                    setVideoFailureMessage("");
-                    clearCompletionCheckInterval();
-                    // Attempt to regenerate
-                    try {
-                      await handleGenerateVideo();
-                    } catch (err) {
-                      console.error('[GolpoAI] Regenerate failed:', err);
-                      setError(err?.message || 'Failed to start regeneration.');
-                    }
-                  }}
-                >
-                  Regenerate
-                </button>
-                <button
                   style={styles.modalSecondaryButton}
-                  onClick={() => {
-                    setShowVideoFailureModal(false);
-                    setVideoFailureMessage("");
-                    clearCompletionCheckInterval();
-                  }}
+                  onClick={() => setShowLowCreditsModal(false)}
                 >
                   Close
                 </button>
@@ -4993,6 +5107,15 @@ function App() {
                       target="_blank"
                       rel="noopener noreferrer"
                       style={styles.videoModalLink}
+                      onClick={(e) => {
+                        // Require Ctrl+Click (or Cmd+Click) to open in a new tab.
+                        // Plain click shows a helpful hint instead.
+                        if (!e.ctrlKey && !e.metaKey) {
+                          e.preventDefault();
+                          setCopyUrlMessage("Tip: Hold Ctrl (or ⌘ on Mac) and click to open the video in a new tab.");
+                          setTimeout(() => setCopyUrlMessage(""), 3000);
+                        }
+                      }}
                     >
                       Open video in a new tab
                     </a>
@@ -5238,12 +5361,34 @@ const styles = {
     color: "#475569",
   },
   videoModalLink: {
-    display: "inline-block",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
     marginTop: 8,
     fontSize: 14,
     color: "#2563eb",
     textDecoration: "underline",
     cursor: "pointer",
+
+    // Make a <button> look like a link (so click can call window.open without Ctrl)
+    background: "transparent",
+    border: "none",
+    padding: 0,
+    fontFamily: "inherit",
+  },
+  videoModalPlayButton: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 10,
+    padding: "10px 16px",
+    borderRadius: 999,
+    border: "1px solid #7C3AED",
+    background: "#7C3AED",
+    color: "#ffffff",
+    fontWeight: 700,
+    cursor: "pointer",
+    boxShadow: "0 10px 20px rgba(124, 58, 237, 0.18)",
   },
   latestVideoActions: {
     display: "flex",
