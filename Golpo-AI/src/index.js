@@ -1582,7 +1582,7 @@ resolver.define('getVideoStatus', async ({ payload }) => {
               ? `${API_KEY.substring(0, 4)}${'*'.repeat(Math.max(0, API_KEY.length - 8))}${API_KEY.substring(API_KEY.length - 4)}`
               : '****';
             
-            // Get current creditsUsage from storage and add creditsDifference to it
+            // Store creditsDifference directly in creditsUsage
             const usageStorageKey = 'golpo-api-key-usage';
             let usageData = {};
             try {
@@ -1594,12 +1594,8 @@ resolver.define('getVideoStatus', async ({ payload }) => {
               console.warn('[resolver:getVideoStatus] Error reading usage data:', error);
             }
             
-            // Get current usage for this API key (default to 0 if not found)
-            const currentUsage = Number(usageData[maskedKey]) || 0;
-            
-            // Add creditsDifference to the existing stored value
-            const newUsage = currentUsage + creditsDifference;
-            usageData[maskedKey] = newUsage;
+            // Store creditsDifference directly in creditsUsage (replacing any existing value)
+            usageData[maskedKey] = creditsDifference;
             
             // Mark this job as tracked BEFORE updating usage to prevent race conditions
             if (jobCreditsData && jobCreditsKey) {
@@ -1610,7 +1606,7 @@ resolver.define('getVideoStatus', async ({ payload }) => {
             
             // Store updated usage
             await storage.set(usageStorageKey, usageData);
-            console.log(`[resolver:getVideoStatus] Updated credits usage for ${maskedKey}: ${currentUsage} + ${creditsDifference} = ${newUsage}`);
+            console.log(`[resolver:getVideoStatus] Set credits usage for ${maskedKey} to: ${creditsDifference}`);
           } else {
             console.warn('[resolver:getVideoStatus] Invalid credits difference calculated:', creditsDifference);
           }
