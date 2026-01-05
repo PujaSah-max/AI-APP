@@ -66,7 +66,8 @@ function App() {
         'Click on an action card to add it to the description box',
         'The context section automatically adds information from the current Confluence page',
         'Click the "Generate" button to start generating your whiteboard video',
-
+        'If a video has already been generated, you can quickly access it using the Recent video → Open Video link at the top',
+        'Want to make changes or create a fresh version? Update the description if needed and click Regenerate'
       ],
       arrows: []
     },
@@ -76,9 +77,8 @@ function App() {
       description: 'Access and manage your created whiteboard videos',
       image: './step 4.png',
       details: [
-      'Click Go to Video to open the most recently generated video for this page',
-
-      'Select Regenerate to create a new version of the video',
+      'Choose your duration, voice, and language for the video',
+      'Optionally enable Generate video with color for a richer visual style',
       'After the video generation is complete, you can view it in the interface',
       'The generated video will be displayed with options to preview, download, or share',
       'The generated video will automatically appear in your page comments once complete'
@@ -289,18 +289,6 @@ function App() {
               </button>
             </>
           )}
-          <button
-            className="btn btnSecondary"
-            onClick={() => {
-              // TODO: Implement feedback functionality
-              console.log('Feedback clicked');
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-            </svg>
-            Feedback
-          </button>
         </div>
       </header>
 
