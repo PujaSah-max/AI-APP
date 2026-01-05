@@ -507,47 +507,8 @@ const getUserApiKeyInternal = async () => {
   }
 };
 
-// Helper function to update cumulative credits usage for an API key
-const updateCreditsUsage = async (apiKey, creditsUsed) => {
-  try {
-    if (!apiKey || creditsUsed <= 0) {
-      return;
-    }
-
-    const usageStorageKey = 'golpo-api-key-usage';
-    
-    // Get existing usage data
-    let usageData = {};
-    try {
-      const existing = await storage.get(usageStorageKey);
-      if (existing && typeof existing === 'object') {
-        usageData = existing;
-      }
-    } catch (error) {
-      console.warn('[updateCreditsUsage] Error reading usage data:', error);
-    }
-
-    // Mask the API key for storage key
-    const maskedKey = apiKey.length > 8 
-      ? `${apiKey.substring(0, 4)}${'*'.repeat(Math.max(0, apiKey.length - 8))}${apiKey.substring(apiKey.length - 4)}`
-      : '****';
-
-    // Get or initialize usage for this API key
-    const currentUsage = usageData[maskedKey] || 0;
-    const newUsage = currentUsage + creditsUsed;
-
-    // Update usage data
-    usageData[maskedKey] = newUsage;
-    usageData[`${maskedKey}_lastUpdated`] = new Date().toISOString();
-
-    // Store updated usage data
-    await storage.set(usageStorageKey, usageData);
-    
-    console.log(`[updateCreditsUsage] Updated credits usage for ${maskedKey}: ${currentUsage} + ${creditsUsed} = ${newUsage}`);
-  } catch (error) {
-    console.error('[updateCreditsUsage] Error updating credits usage:', error);
-  }
-};
+// TODO: Add your credits usage logic here
+// Implement your own logic to track and update cumulative credits usage
 
 // Resolver to get credits information for all API keys in history
 resolver.define('getCredits', async () => {
@@ -918,7 +879,8 @@ resolver.define('generateVideo', async ({ payload }) => {
     throw new Error('Golpo API key is not configured. Please contact your administrator to configure the API key in the Global Page Settings.');
   }
 
-  // Fetch credits before video generation
+  // Fetch current_credits before video generation (this is the creditsBefore value)
+  // This captures the current_credits value before any video generation starts
   let creditsBefore = 0;
   try {
     const creditsResponseBefore = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
@@ -931,8 +893,13 @@ resolver.define('generateVideo', async ({ payload }) => {
     
     if (creditsResponseBefore.ok) {
       const creditsDataBefore = await creditsResponseBefore.json();
-      creditsBefore = creditsDataBefore.credits || creditsDataBefore.current_credits || 0;
-      console.log('[resolver:generateVideo] Credits before generation:', creditsBefore);
+      // Use current_credits as primary (this is the field that updates after every video generation)
+      creditsBefore = creditsDataBefore.current_credits !== undefined && creditsDataBefore.current_credits !== null
+        ? creditsDataBefore.current_credits
+        : (creditsDataBefore.credits !== undefined && creditsDataBefore.credits !== null
+          ? creditsDataBefore.credits
+          : 0);
+      console.log('[resolver:generateVideo] Credits before generation (current_credits):', creditsBefore);
     }
   } catch (error) {
     console.warn('[resolver:generateVideo] Failed to fetch credits before generation:', error);
@@ -1222,16 +1189,12 @@ resolver.define('generateVideo', async ({ payload }) => {
     console.log('[resolver:generateVideo] Step 2: Golpo AI API response received');
     console.log('[resolver:generateVideo] Golpo AI API response:', JSON.stringify(data, null, 2));
 
-    // Check if credits info is in the response
-    const responseCredits = data?.credits_used || data?.creditsUsed || data?.credits_deducted || null;
-    
     // Extract jobId and pageId from response/document
     const jobId = data?.job_id || data?.jobId || data?.id || data?.data?.job_id || data?.data?.jobId;
     const pageId = document?.pageId || document?.metadata?.pageId;
 
-    // Store credits before value with jobId for tracking when video completes
-    // Credits are deducted when video generation is completed, not immediately
-    if (jobId && creditsBefore > 0) {
+    // Store creditsBefore with jobId for later use when video completes
+    if (jobId) {
       try {
         const jobCreditsKey = `golpo-job-credits-${jobId}`;
         await storage.set(jobCreditsKey, {
@@ -1537,6 +1500,24 @@ resolver.define('getVideoStatus', async ({ payload }) => {
     const data = await response.json();
     console.log('[resolver:getVideoStatus] Status response:', JSON.stringify(data, null, 2));
 
+    // Retrieve creditsBefore from storage before checking if status is completed
+    let creditsBefore = 0;
+    let jobCreditsData = null;
+    let jobCreditsKey = null;
+    if (jobId) {
+      try {
+        jobCreditsKey = `golpo-job-credits-${jobId}`;
+        jobCreditsData = await storage.get(jobCreditsKey);
+        
+        if (jobCreditsData && jobCreditsData.creditsBefore !== undefined && jobCreditsData.creditsBefore !== null) {
+          creditsBefore = Number(jobCreditsData.creditsBefore) || 0;
+          console.log('[resolver:getVideoStatus] Retrieved credits before:', creditsBefore);
+        }
+      } catch (error) {
+        console.warn('[resolver:getVideoStatus] Failed to retrieve credits before:', error);
+      }
+    }
+
     // Check if video is completed and track credits usage
     const videoStatus = data?.status || data?.state || data?.body?.status || '';
     const statusLower = videoStatus.toLowerCase();
@@ -1547,60 +1528,97 @@ resolver.define('getVideoStatus', async ({ payload }) => {
                        statusLower === 'done' ||
                        statusLower === 'complete';
 
+    // Fetch current_credits when video is completed (this is the creditsAfter value)
+    let creditsAfter = 0;
     if (isCompleted && jobId) {
       try {
-        // Get stored credits before value for this job
-        const jobCreditsKey = `golpo-job-credits-${jobId}`;
-        const jobCreditsData = await storage.get(jobCreditsKey);
+        const creditsResponseAfter = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': API_KEY,
+          },
+        });
         
-        if (jobCreditsData && jobCreditsData.creditsBefore && !jobCreditsData.creditsTracked) {
-          const creditsBefore = jobCreditsData.creditsBefore;
-          const apiKey = jobCreditsData.apiKey || API_KEY;
-          
-          // Fetch current credits after completion
-          const creditsResponseAfter = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
-            method: 'GET',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': apiKey,
-            },
-          });
-          
-          if (creditsResponseAfter.ok) {
-            const creditsDataAfter = await creditsResponseAfter.json();
-            const creditsAfter = creditsDataAfter.credits || creditsDataAfter.current_credits || 0;
-            const creditsUsed = creditsBefore - creditsAfter;
-            
-            console.log('[resolver:getVideoStatus] Video completed. Credits tracking:', {
-              jobId: jobId,
-              before: creditsBefore,
-              after: creditsAfter,
-              used: creditsUsed
-            });
-            
-            if (creditsUsed > 0) {
-              console.log('[resolver:getVideoStatus] Credits used for completed video:', creditsUsed);
-              
-              // Update cumulative credits usage for this API key
-              await updateCreditsUsage(apiKey, creditsUsed);
-              
-              // Mark as tracked to avoid double counting
-              await storage.set(jobCreditsKey, {
-                ...jobCreditsData,
-                creditsAfter: creditsAfter,
-                creditsUsed: creditsUsed,
-                creditsTracked: true,
-                trackedAt: new Date().toISOString()
-              });
-            } else {
-              console.warn('[resolver:getVideoStatus] No credits deducted. Before:', creditsBefore, 'After:', creditsAfter);
-            }
-          }
-        } else if (jobCreditsData && jobCreditsData.creditsTracked) {
-          console.log('[resolver:getVideoStatus] Credits already tracked for job:', jobId);
+        if (creditsResponseAfter.ok) {
+          const creditsDataAfter = await creditsResponseAfter.json();
+          // Use current_credits as primary (this is the field that updates after every video generation)
+          creditsAfter = creditsDataAfter.current_credits !== undefined && creditsDataAfter.current_credits !== null
+            ? creditsDataAfter.current_credits
+            : (creditsDataAfter.credits !== undefined && creditsDataAfter.credits !== null
+              ? creditsDataAfter.credits
+              : 0);
+          console.log('[resolver:getVideoStatus] Credits after generation (current_credits):', creditsAfter);
         }
       } catch (error) {
-        console.warn('[resolver:getVideoStatus] Error tracking credits for completed video:', error);
+        console.warn('[resolver:getVideoStatus] Failed to fetch credits after generation:', error);
+      }
+      
+      // Check if credits have already been tracked for this job to avoid duplicate processing
+      const alreadyTracked = jobCreditsData && jobCreditsData.creditsTracked === true;
+      if (alreadyTracked) {
+        console.log('[resolver:getVideoStatus] Credits already tracked for job:', jobId);
+      }
+      
+      // Calculate difference using creditsBefore (already retrieved) and creditsAfter
+      // Only process if not already tracked and we have valid values
+      if (!alreadyTracked && creditsBefore > 0 && creditsAfter > 0) {
+        try {
+          const creditsAfterNum = Number(creditsAfter) || 0;
+          const creditsBeforeNum = Number(creditsBefore) || 0;
+          
+          // Calculate the difference
+          const creditsDifference = creditsBeforeNum - creditsAfterNum;
+          console.log('[resolver:getVideoStatus] Credits calculation:', {
+            creditsBefore: creditsBeforeNum,
+            creditsAfter: creditsAfterNum,
+            difference: creditsDifference
+          });
+          
+          // Only proceed if we have valid values and difference is positive
+          if (!isNaN(creditsDifference) && isFinite(creditsDifference) && creditsDifference > 0) {
+            // Get masked API key for storage
+            const maskedKey = API_KEY.length > 8 
+              ? `${API_KEY.substring(0, 4)}${'*'.repeat(Math.max(0, API_KEY.length - 8))}${API_KEY.substring(API_KEY.length - 4)}`
+              : '****';
+            
+            // Get current creditsUsage from storage and add creditsDifference to it
+            const usageStorageKey = 'golpo-api-key-usage';
+            let usageData = {};
+            try {
+              const existingUsage = await storage.get(usageStorageKey);
+              if (existingUsage && typeof existingUsage === 'object') {
+                usageData = existingUsage;
+              }
+            } catch (error) {
+              console.warn('[resolver:getVideoStatus] Error reading usage data:', error);
+            }
+            
+            // Get current usage for this API key (default to 0 if not found)
+            const currentUsage = Number(usageData[maskedKey]) || 0;
+            
+            // Add creditsDifference to the existing stored value
+            const newUsage = currentUsage + creditsDifference;
+            usageData[maskedKey] = newUsage;
+            
+            // Mark this job as tracked BEFORE updating usage to prevent race conditions
+            if (jobCreditsData && jobCreditsKey) {
+              jobCreditsData.creditsTracked = true;
+              await storage.set(jobCreditsKey, jobCreditsData);
+              console.log('[resolver:getVideoStatus] Marked job as tracked:', jobId);
+            }
+            
+            // Store updated usage
+            await storage.set(usageStorageKey, usageData);
+            console.log(`[resolver:getVideoStatus] Updated credits usage for ${maskedKey}: ${currentUsage} + ${creditsDifference} = ${newUsage}`);
+          } else {
+            console.warn('[resolver:getVideoStatus] Invalid credits difference calculated:', creditsDifference);
+          }
+        } catch (error) {
+          console.error('[resolver:getVideoStatus] Error calculating and storing credits usage:', error);
+        }
+      } else {
+        console.warn('[resolver:getVideoStatus] creditsBefore or creditsAfter is 0, skipping calculation');
       }
     }
 
