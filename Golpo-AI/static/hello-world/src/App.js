@@ -12,11 +12,11 @@ const FORCE_TEST_CREDITS = null;
 
 const quickActions = ["Whiteboard explainer video of Confluence page"];
 const durationOptions = [
+  { label: "15 sec", minutes: 0.25 },
   { label: "30 sec", minutes: 0.5 },
   { label: "1 min", minutes: 1 },
   { label: "2 min", minutes: 2 },
-  { label: "3 min", minutes: 3 },
-  { label: "4 min", minutes: 5 },
+  { label: "4 min", minutes: 4 },
 ];
 const languageOptions = [
   "English",

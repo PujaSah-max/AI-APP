@@ -796,6 +796,12 @@ html, body {
     padding: 12px 16px;
   }
 
+  .formGroup {
+    margin-bottom: 12px;
+  }
+}
+
+/* Credits Table Styles - moved outside media query to apply on all screen sizes */
 .creditsTableContainer {
   overflow-x: auto;
   border: 1px solid #dfe1e6;
@@ -913,11 +919,6 @@ html, body {
 @keyframes spin {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
-}
-
-  .formGroup {
-    margin-bottom: 12px;
-  }
 }
 
 /* Feedback View Styles */
