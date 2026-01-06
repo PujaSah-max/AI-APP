@@ -10,11 +10,11 @@ const GOLPO_API_BASE_URL = (process.env.GOLPO_API_BASE_URL || 'https://staging-a
 const GEMINI_API_BASE_URL = (process.env.GEMINI_API_BASE_URL || 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
 
 const durationLabelMap = {
+  '15 sec': 0.25,
   '30 sec': 0.5,
   '1 min': 1,
   '2 min': 2,
-  '3 min': 3,
-  '5 min': 5,
+  '4 min': 4,
 };
 
 // Map display language names to backend accepted keywords
@@ -1582,7 +1582,7 @@ resolver.define('getVideoStatus', async ({ payload }) => {
               ? `${API_KEY.substring(0, 4)}${'*'.repeat(Math.max(0, API_KEY.length - 8))}${API_KEY.substring(API_KEY.length - 4)}`
               : '****';
             
-            // Store creditsDifference directly in creditsUsage
+            // Get current creditsUsage from storage and add creditsDifference to it
             const usageStorageKey = 'golpo-api-key-usage';
             let usageData = {};
             try {
@@ -1594,8 +1594,14 @@ resolver.define('getVideoStatus', async ({ payload }) => {
               console.warn('[resolver:getVideoStatus] Error reading usage data:', error);
             }
             
-            // Store creditsDifference directly in creditsUsage (replacing any existing value)
-            usageData[maskedKey] = creditsDifference;
+            console.log('[resolver:getVideoStatus] Usage data from storage:', usageData);
+            
+            // Get current usage for this API key (default to 0 if not found)
+            const currentUsage = Number(usageData[maskedKey]) || 0;
+            
+            // Add creditsDifference to the existing stored value
+            const newUsage = currentUsage + creditsDifference;
+            usageData[maskedKey] = newUsage;
             
             // Mark this job as tracked BEFORE updating usage to prevent race conditions
             if (jobCreditsData && jobCreditsKey) {
@@ -1606,7 +1612,7 @@ resolver.define('getVideoStatus', async ({ payload }) => {
             
             // Store updated usage
             await storage.set(usageStorageKey, usageData);
-            console.log(`[resolver:getVideoStatus] Set credits usage for ${maskedKey} to: ${creditsDifference}`);
+            console.log(`[resolver:getVideoStatus] Updated credits usage for ${maskedKey}: ${currentUsage} + ${creditsDifference} = ${newUsage}`);
           } else {
             console.warn('[resolver:getVideoStatus] Invalid credits difference calculated:', creditsDifference);
           }
