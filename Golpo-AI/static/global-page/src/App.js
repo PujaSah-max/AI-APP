@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@forge/bridge';
 import './App.css';
 
@@ -10,6 +10,7 @@ import './App.css';
  */
 function App() {
   const [expandedStep, setExpandedStep] = useState(null);
+  const prevExpandedStepRef = useRef(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [isCheckingAdmin, setIsCheckingAdmin] = useState(true);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -103,6 +104,24 @@ function App() {
     };
     checkAdmin();
   }, []);
+
+  // Reset scroll position when a step is collapsed
+  useEffect(() => {
+    // Only reset scroll if we're collapsing (had a step expanded, now null)
+    if (prevExpandedStepRef.current !== null && expandedStep === null) {
+      // Step was collapsed, reset scroll to top and force page height recalculation
+      setTimeout(() => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        // Force browser to recalculate page height
+        document.body.style.overflow = 'hidden';
+        setTimeout(() => {
+          document.body.style.overflow = '';
+        }, 10);
+      }, 100);
+    }
+    // Update the ref to track previous value
+    prevExpandedStepRef.current = expandedStep;
+  }, [expandedStep]);
 
   // Fetch API key when opening settings modal
   const handleOpenSettings = useCallback(async () => {
