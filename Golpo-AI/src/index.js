@@ -636,6 +636,44 @@ resolver.define('getCredits', async () => {
   }
 });
 
+// Get credit usage history from storage
+resolver.define('getCreditUsageHistory', async () => {
+  try {
+    const historyStorageKey = 'golpo-credit-usage-history';
+    let historyArray = [];
+    
+    try {
+      const existingHistory = await storage.get(historyStorageKey);
+      if (Array.isArray(existingHistory)) {
+        historyArray = existingHistory;
+      }
+    } catch (error) {
+      console.warn('[resolver:getCreditUsageHistory] Error reading history data:', error);
+    }
+    
+    // Sort by timestamp descending (newest first)
+    const sortedHistory = [...historyArray].sort((a, b) => {
+      const timeA = new Date(a.timestamp || 0).getTime();
+      const timeB = new Date(b.timestamp || 0).getTime();
+      return timeB - timeA;
+    });
+    
+    console.log('[resolver:getCreditUsageHistory] Returning', sortedHistory.length, 'history records');
+    
+    return {
+      success: true,
+      history: sortedHistory
+    };
+  } catch (error) {
+    console.error('[resolver:getCreditUsageHistory] Error:', error);
+    return {
+      success: false,
+      history: [],
+      error: error?.message || 'Failed to load credit usage history'
+    };
+  }
+});
+
 resolver.define('getFooterComments', async ({ payload }) => {
   try {
   const { pageId } = payload ?? {};
@@ -1582,26 +1620,42 @@ resolver.define('getVideoStatus', async ({ payload }) => {
               ? `${API_KEY.substring(0, 4)}${'*'.repeat(Math.max(0, API_KEY.length - 8))}${API_KEY.substring(API_KEY.length - 4)}`
               : '****';
             
-            // Get current creditsUsage from storage and add creditsDifference to it
-            const usageStorageKey = 'golpo-api-key-usage';
-            let usageData = {};
+            // Store credit usage history record
+            const historyStorageKey = 'golpo-credit-usage-history';
+            let historyArray = [];
             try {
-              const existingUsage = await storage.get(usageStorageKey);
-              if (existingUsage && typeof existingUsage === 'object') {
-                usageData = existingUsage;
+              const existingHistory = await storage.get(historyStorageKey);
+              if (Array.isArray(existingHistory)) {
+                historyArray = existingHistory;
               }
             } catch (error) {
-              console.warn('[resolver:getVideoStatus] Error reading usage data:', error);
+              console.warn('[resolver:getVideoStatus] Error reading history data:', error);
             }
             
-            console.log('[resolver:getVideoStatus] Usage data from storage:', usageData);
+            // Check if this jobId already exists in history (prevent duplicates)
+            const existingIndex = historyArray.findIndex(h => h.jobId === jobId);
+            const historyRecord = {
+              jobId: jobId,
+              apiKey: maskedKey,
+              creditsBefore: creditsBeforeNum,
+              creditsAfter: creditsAfterNum,
+              creditsUsed: creditsDifference,
+              timestamp: new Date().toISOString()
+            };
             
-            // Get current usage for this API key (default to 0 if not found)
-            const currentUsage = Number(usageData[maskedKey]) || 0;
+            if (existingIndex >= 0) {
+              // Update existing record
+              historyArray[existingIndex] = historyRecord;
+              console.log('[resolver:getVideoStatus] Updated existing history record for job:', jobId);
+            } else {
+              // Add new record
+              historyArray.push(historyRecord);
+              console.log('[resolver:getVideoStatus] Added new history record for job:', jobId);
+            }
             
-            // Add creditsDifference to the existing stored value
-            const newUsage = currentUsage + creditsDifference;
-            usageData[maskedKey] = newUsage;
+            // Store updated history
+            await storage.set(historyStorageKey, historyArray);
+            console.log(`[resolver:getVideoStatus] Stored credit usage history record: ${creditsBeforeNum} - ${creditsAfterNum} = ${creditsDifference}`);
             
             // Mark this job as tracked BEFORE updating usage to prevent race conditions
             if (jobCreditsData && jobCreditsKey) {
@@ -1609,10 +1663,6 @@ resolver.define('getVideoStatus', async ({ payload }) => {
               await storage.set(jobCreditsKey, jobCreditsData);
               console.log('[resolver:getVideoStatus] Marked job as tracked:', jobId);
             }
-            
-            // Store updated usage
-            await storage.set(usageStorageKey, usageData);
-            console.log(`[resolver:getVideoStatus] Updated credits usage for ${maskedKey}: ${currentUsage} + ${creditsDifference} = ${newUsage}`);
           } else {
             console.warn('[resolver:getVideoStatus] Invalid credits difference calculated:', creditsDifference);
           }

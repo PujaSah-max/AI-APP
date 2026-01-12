@@ -206,16 +206,46 @@ function App() {
     setCreditsList([]);
     
     try {
+      // Load credit usage history from backend
+      const historyResponse = await invoke('getCreditUsageHistory');
+      console.log('📋 Credit usage history response:', historyResponse);
+      
+      let creditsUsage = 0;
+      if (historyResponse?.success && Array.isArray(historyResponse.history)) {
+        // Sort by timestamp descending (newest first)
+        const sortedHistory = [...historyResponse.history].sort((a, b) => {
+          const timeA = new Date(a.timestamp || 0).getTime();
+          const timeB = new Date(b.timestamp || 0).getTime();
+          return timeB - timeA;
+        });
+        
+        console.log('📋 Setting credit usage history with', sortedHistory.length, 'records');
+        console.log('📋 History records:', sortedHistory);
+        
+        // Calculate total cumulative credits used
+        creditsUsage = sortedHistory.reduce((sum, record) => {
+          const used = Number(record.creditsUsed) || 0;
+          return sum + used;
+        }, 0);
+        console.log('📋 Total cumulative credits used:', creditsUsage.toFixed(2));
+      }
+      
+      // Fetch current credits from backend
       const result = await invoke('getCredits');
       if (result && result.success) {
         if (result.credits && Array.isArray(result.credits)) {
-          setCreditsList(result.credits);
+          // Update each credit item with calculated usage
+          const updatedCredits = result.credits.map(item => ({
+            ...item,
+            creditsUsage: creditsUsage
+          }));
+          setCreditsList(updatedCredits);
         } else {
           // Backward compatibility: if single credits object
           setCreditsData(result);
           setCreditsList([{
             apiKey: result.apiKey,
-            creditsUsage: result.creditsUsage,
+            creditsUsage: creditsUsage,
             currentCredits: result.currentCredits
           }]);
         }
@@ -235,16 +265,46 @@ function App() {
     setCreditsError('');
     
     try {
+      // Load credit usage history from backend
+      const historyResponse = await invoke('getCreditUsageHistory');
+      console.log('📋 Credit usage history response:', historyResponse);
+      
+      let creditsUsage = 0;
+      if (historyResponse?.success && Array.isArray(historyResponse.history)) {
+        // Sort by timestamp descending (newest first)
+        const sortedHistory = [...historyResponse.history].sort((a, b) => {
+          const timeA = new Date(a.timestamp || 0).getTime();
+          const timeB = new Date(b.timestamp || 0).getTime();
+          return timeB - timeA;
+        });
+        
+        console.log('📋 Setting credit usage history with', sortedHistory.length, 'records');
+        console.log('📋 History records:', sortedHistory);
+        
+        // Calculate total cumulative credits used
+        creditsUsage = sortedHistory.reduce((sum, record) => {
+          const used = Number(record.creditsUsed) || 0;
+          return sum + used;
+        }, 0);
+        console.log('📋 Total cumulative credits used:', creditsUsage.toFixed(2));
+      }
+      
+      // Fetch current credits from backend
       const result = await invoke('getCredits');
       if (result && result.success) {
         if (result.credits && Array.isArray(result.credits)) {
-          setCreditsList(result.credits);
+          // Update each credit item with calculated usage
+          const updatedCredits = result.credits.map(item => ({
+            ...item,
+            creditsUsage: creditsUsage
+          }));
+          setCreditsList(updatedCredits);
         } else {
           // Backward compatibility: if single credits object
           setCreditsData(result);
           setCreditsList([{
             apiKey: result.apiKey,
-            creditsUsage: result.creditsUsage,
+            creditsUsage: creditsUsage,
             currentCredits: result.currentCredits
           }]);
         }
