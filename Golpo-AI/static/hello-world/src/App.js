@@ -5622,13 +5622,15 @@ const styles = {
     zIndex: 1000,
   },
   modal: {
-    width: 500,
-    maxWidth: "90vw",
+    width: 360,
+    maxWidth: "80vw",
+    maxHeight: "85vh",
     background: "#fff",
-    padding: 28,
+    padding: 18,
     borderRadius: 16,
     boxShadow: "0 10px 40px rgba(0,0,0,0.15)",
     position: "relative",
+    overflowY: "auto",
   },
   modalLoaderOverlay: {
     position: "absolute",
@@ -5662,8 +5664,8 @@ const styles = {
   modalHeader: {
     display: "flex",
     alignItems: "flex-start",
-    gap: 16,
-    marginBottom: 24,
+    gap: 12,
+    marginBottom: 16,
   },
   modalIconWrapper: {
     width: 40,
@@ -5675,7 +5677,7 @@ const styles = {
     flexShrink: 0,
   },
   modalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: 700,
     color: "#1e293b",
     margin: 0,
@@ -5687,18 +5689,18 @@ const styles = {
     margin: 0,
   },
   modalForm: {
-    marginBottom: 24,
+    marginBottom: 16,
   },
   formRow: {
     display: "grid",
     gridTemplateColumns: "1fr 1fr",
-    gap: 16,
-    marginBottom: 16,
+    gap: 12,
+    marginBottom: 12,
   },
   formField: {
     display: "flex",
     flexDirection: "column",
-    gap: 8,
+    gap: 6,
   },
   formLabel: {
     fontSize: 14,
@@ -5741,9 +5743,9 @@ const styles = {
   formCheckboxRow: {
     display: "flex",
     alignItems: "center",
-    gap: 10,
-    marginTop: 16,
-    marginBottom: 8,
+    gap: 8,
+    marginTop: 12,
+    marginBottom: 6,
   },
   formCheckbox: {
     width: 18,
@@ -5761,14 +5763,14 @@ const styles = {
     display: "flex",
     justifyContent: "flex-end",
     gap: 12,
-    paddingTop: 20,
+    paddingTop: 16,
     borderTop: "1px solid #e2e8f0",
   },
   modalActions: {
     display: "flex",
     justifyContent: "flex-end",
     gap: 12,
-    marginTop: 20,
+    marginTop: 16,
   },
   modalPrimaryButton: {
     padding: "10px 20px",
@@ -5851,9 +5853,9 @@ const styles = {
   loadingCard: {
     background: "white",
     borderRadius: 20,
-    padding: "32px 40px",
-    maxWidth: 420,
-    width: "90%",
+    padding: "24px 28px",
+    maxWidth: 350,
+    width: "85%",
     boxShadow: "0 20px 40px rgba(0, 0, 0, 0.15)",
     display: "flex",
     flexDirection: "column",
@@ -5871,8 +5873,8 @@ const styles = {
     margin: "0 auto 12px", // center horizontally and add bottom spacing
   },
   loadingEmoji: { fontSize: 40, marginBottom: 12 },
-  loadingTitle: { margin: 0, fontSize: 20, fontWeight: 700, color: "#000" },
-  loadingMessage: { marginTop: 12, fontSize: 15, color: "#000", fontWeight: 600, minHeight: "20px" },
+  loadingTitle: { margin: 0, fontSize: 18, fontWeight: 700, color: "#000" },
+  loadingMessage: { marginTop: 10, fontSize: 14, color: "#000", fontWeight: 600, minHeight: "20px" },
   loadingJobId: { marginTop: 8, fontSize: 13, color: "#475569", opacity: 0.9, fontWeight: 700 },
   loadingSubtext: { marginTop: 12, fontSize: 12, color: "#475569", opacity: 0.8, fontWeight: 700 },
   loadingCloseButton: {
@@ -5936,10 +5938,10 @@ const styles = {
   videoReadyCard: {
     background: "#fff",
     borderRadius: 20,
-    padding: "28px 32px",
-    maxWidth: 900,
-    width: "95%",
-    maxHeight: "90vh",
+    padding: "20px 24px",
+    maxWidth: 600,
+    width: "90%",
+    maxHeight: "85vh",
     overflowY: "auto",
     boxShadow: "0 25px 55px rgba(15, 23, 42, 0.25)",
     position: "relative",
@@ -5962,7 +5964,7 @@ const styles = {
   },
   videoReadyTitle: {
     margin: 0,
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: 700,
     color: "#0f172a",
   },
@@ -6093,9 +6095,9 @@ const styles = {
   videoExistsCard: {
     background: "#fff",
     borderRadius: 20,
-    padding: "28px 32px",
-    maxWidth: 520,
-    width: "95%",
+    padding: "20px 24px",
+    maxWidth: 400,
+    width: "90%",
     boxShadow: "0 25px 55px rgba(15, 23, 42, 0.25)",
     position: "relative",
   },
@@ -6111,7 +6113,7 @@ const styles = {
   },
   videoExistsTitle: {
     margin: 0,
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: 700,
     color: "#0f172a",
   },
