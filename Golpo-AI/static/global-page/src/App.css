@@ -60,13 +60,13 @@ html, body {
 .brand {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 16px;
   min-width: 0;
 }
 
 .brandIconWrap {
-  width: 54px;
-  height: 54px;
+  width: 64px;
+  height: 64px;
   border-radius: 999px;
   background: #ffffff;
   box-shadow: 0 0 0 1px rgba(9, 30, 66, 0.12);
@@ -104,8 +104,8 @@ html, body {
 }
 
 .brandName {
-  font-size: 20px;
-  line-height: 24px;
+  font-size: 24px;
+  line-height: 28px;
   font-weight: 700;
   letter-spacing: -0.01em;
 }
@@ -127,9 +127,9 @@ html, body {
   appearance: none;
   border: 1px solid transparent;
   border-radius: 999px;
-  padding: 8px 16px;
-  font-size: 13px;
-  line-height: 16px;
+  padding: 10px 20px;
+  font-size: 15px;
+  line-height: 20px;
   font-weight: 600;
   cursor: pointer;
   user-select: none;
@@ -137,7 +137,7 @@ html, body {
   z-index: 1;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .btnSecondary {
@@ -200,16 +200,17 @@ html, body {
 }
 
 .navGuideTitle {
-  margin: 0 0 8px;
-  font-size: 18px;
+  margin: 0 0 12px;
+  font-size: 24px;
   font-weight: 700;
   color: #172b4d;
+  line-height: 32px;
 }
 
 .navGuideIntro {
-  margin: 0 0 16px;
-  font-size: 13px;
-  line-height: 18px;
+  margin: 0 0 20px;
+  font-size: 16px;
+  line-height: 24px;
   color: #6b778c;
 }
 
@@ -243,8 +244,8 @@ html, body {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
+  gap: 16px;
+  padding: 16px 18px;
   background: transparent;
   border: none;
   cursor: pointer;
@@ -257,16 +258,16 @@ html, body {
 }
 
 .navStepNumber {
-  flex: 0 0 28px;
-  width: 28px;
-  height: 28px;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #0052cc;
+  background: #FE6A7D;
   color: #ffffff;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 16px;
   font-weight: 700;
 }
 
@@ -276,27 +277,27 @@ html, body {
 }
 
 .navStepTitle {
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
-  line-height: 20px;
+  line-height: 24px;
   color: #172b4d;
-  margin-bottom: 2px;
+  margin-bottom: 4px;
 }
 
 .navStepDesc {
-  font-size: 12px;
-  line-height: 16px;
+  font-size: 14px;
+  line-height: 20px;
   color: #6b778c;
 }
 
 .navStepToggle {
-  flex: 0 0 24px;
-  width: 24px;
-  height: 24px;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 300;
   color: #6b778c;
   transition: transform 0.2s ease;
@@ -456,10 +457,10 @@ html, body {
 }
 
 .navStepDetailsTitle {
-  font-size: 13px;
+  font-size: 16px;
   font-weight: 600;
   color: #172b4d;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
 .navStepList {
@@ -471,11 +472,11 @@ html, body {
 
 .navStepList li {
   position: relative;
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 14px;
+  line-height: 22px;
   color: #42526e;
-  margin-bottom: 6px;
-  padding-left: 20px;
+  margin-bottom: 8px;
+  padding-left: 24px;
 }
 
 .navStepList li::before {
@@ -1019,6 +1020,6 @@ html, body {
 }
 
 .footerBrand {
-  color: #ff5630;
+  color: #FE6A7D;
   font-weight: 500;
 }
