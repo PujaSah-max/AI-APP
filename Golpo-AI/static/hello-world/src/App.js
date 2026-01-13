@@ -1892,11 +1892,11 @@ function App() {
                   setIsGeneratingVideo(false);
                   setVideoStatusMessage("");
                   
-                  // Show completion popup after a brief delay
+                  // Show completion popup after a brief delay to prevent flicker
                   setTimeout(() => {
                     setShowVideoCompletionModal(true);
                     console.log("[GolpoAI] Completion popup shown for already-completed video");
-                  }, 500);
+                  }, 100);
                 } else {
                   // No URL found - just clear localStorage
                   console.log("[GolpoAI] Video already completed but no URL found, clearing stored job");
@@ -2006,10 +2006,16 @@ function App() {
                   // Even if modal was dismissed, show completion popup when video is ready
                   setTimeout(() => {
                     setCompletedVideoUrl(videoUrl);
+                    // Set completion modal first to prevent flicker
                     setShowVideoCompletionModal(true);
-                    setIsGeneratingVideo(false);
-                    setIsPollingVideoStatus(false);
-                    setVideoStatusMessage("");
+                    
+                    // Use requestAnimationFrame to ensure smooth transition
+                    requestAnimationFrame(() => {
+                      setIsGeneratingVideo(false);
+                      setIsPollingVideoStatus(false);
+                      setVideoStatusMessage("");
+                    });
+                    
                     localStorage.removeItem('golpo_video_job_id');
                     localStorage.removeItem('golpo_video_page_id');
                     localStorage.removeItem('golpo_video_modal_dismissed');
@@ -2240,14 +2246,22 @@ function App() {
           // Check if we're on the correct page before showing popup
           const onCorrectPage = await isOnCorrectPage();
           if (onCorrectPage) {
+            // Set completion modal first to prevent flicker
             setShowVideoCompletionModal(true);
             console.log("[GolpoAI] handleVideoReady: Showing completion popup for video:", videoUrl);
+            
+            // Use requestAnimationFrame to ensure smooth transition
+            requestAnimationFrame(() => {
+              setIsGeneratingVideo(false);
+              setIsPollingVideoStatus(false);
+              setVideoStatusMessage("");
+            });
           } else {
             console.log("[GolpoAI] handleVideoReady: Not showing completion popup - on different page");
+            setIsGeneratingVideo(false);
+            setIsPollingVideoStatus(false);
+            setVideoStatusMessage("");
           }
-          setIsGeneratingVideo(false);
-          setIsPollingVideoStatus(false);
-          setVideoStatusMessage("");
         }, 1500); // Show "Complete" status for 1.5 seconds
       }
       
@@ -3193,9 +3207,15 @@ function App() {
                             // Wait a moment, then show completion popup
                             setTimeout(() => {
                               setCompletedVideoUrl(videoUrl);
+                              // Set completion modal first to prevent flicker
                               setShowVideoCompletionModal(true);
-                              setIsGeneratingVideo(false);
-                              setVideoStatusMessage("");
+                              
+                              // Use requestAnimationFrame to ensure smooth transition
+                              requestAnimationFrame(() => {
+                                setIsGeneratingVideo(false);
+                                setVideoStatusMessage("");
+                              });
+                              
                               localStorage.removeItem('golpo_video_job_id');
                               localStorage.removeItem('golpo_video_page_id');
                               localStorage.setItem('golpo_last_seen_video_url', videoUrl);
@@ -3932,14 +3952,16 @@ function App() {
                     
                     // Ensure completedVideoUrl is set before showing modal
                     setCompletedVideoUrl(videoUrl);
-                    setShowVideoCompletionModal(true);
-                    setIsGeneratingVideo(false);
-                    setIsPollingVideoStatus(false);
                     
-                    // Keep status message visible briefly, then clear it
-                    setTimeout(() => {
+                    // Set completion modal first, then close loading modal to prevent flicker
+                    setShowVideoCompletionModal(true);
+                    
+                    // Use requestAnimationFrame to ensure smooth transition
+                    requestAnimationFrame(() => {
+                      setIsGeneratingVideo(false);
+                      setIsPollingVideoStatus(false);
                       setVideoStatusMessage("");
-                    }, 500);
+                    });
                     
                     previousLatestUrlRef.current = videoUrl;
                     console.log("[GolpoAI] Completion popup should now be visible");
@@ -4687,7 +4709,7 @@ function App() {
 
       {showVideoCompletionModal && (
         <div style={styles.videoReadyOverlay}>
-          <div style={styles.videoReadyCard}>
+          <div style={styles.videoCompletionCard}>
             <button
               onClick={() => {
                 setShowVideoCompletionModal(false);
@@ -4723,10 +4745,10 @@ function App() {
               <h2 style={styles.modalTitle}>Your video is ready!</h2>
             </div>
             <div style={styles.modalBody}>
-              <p style={{ marginBottom: 12, color: "#475569", lineHeight: 1.6 }}>
+              <p style={{ marginBottom: 8, color: "#475569", lineHeight: 1.45, fontSize: 13 }}>
                 Your Golpo AI video has been generated and the link has been added to this page's comments.
               </p>
-              <p style={{ marginBottom: 20, color: "#475569", lineHeight: 1.6 }}>
+              <p style={{ marginBottom: 14, color: "#475569", lineHeight: 1.45, fontSize: 13 }}>
                 You can scroll to the latest comment to view the video link, or use the buttons below.
               </p>
               <div style={styles.modalActions}>
@@ -5078,7 +5100,7 @@ function App() {
       {/* Simple video player modal with Close, Copy URL, and Download buttons */}
       {showVideoPlayerModal && videoReadyInfo?.videoUrl && (
         <div style={styles.videoReadyOverlay}>
-          <div style={styles.videoReadyCard}>
+          <div style={styles.videoPlayerCard}>
             <button
               style={styles.videoReadyCloseButton}
               onClick={() => {
@@ -5112,7 +5134,7 @@ function App() {
                         // Plain click shows a helpful hint instead.
                         if (!e.ctrlKey && !e.metaKey) {
                           e.preventDefault();
-                          setCopyUrlMessage("Tip: Hold Ctrl (or ⌘ on Mac) and click to open the video in a new tab.");
+                          setCopyUrlMessage("Press Ctrl+Click (or ⌘+Click on Mac) to open the video.");
                           setTimeout(() => setCopyUrlMessage(""), 3000);
                         }
                       }}
@@ -5206,29 +5228,12 @@ function App() {
             </div>
 
             <div style={styles.videoReadyActions}>
-              {isVideoTooLarge ? (
-                <button
-                  style={styles.videoReadySecondaryButton}
-                  onClick={handleDownloadVideo}
-                >
-                  Download
-                </button>
-              ) : (
-                <>
-                  <button
-                    style={styles.videoReadyPrimaryButton}
-                    onClick={() => handleCopyVideoUrl(videoReadyInfo.videoUrl)}
-                  >
-                    Copy URL
-                  </button>
-                  <button
-                    style={styles.videoReadySecondaryButton}
-                    onClick={handleDownloadVideo}
-                  >
-                    Download
-                  </button>
-                </>
-              )}
+              <button
+                style={styles.videoReadySecondaryButton}
+                onClick={handleDownloadVideo}
+              >
+                Download
+              </button>
             </div>
           </div>
         </div>
@@ -5277,18 +5282,18 @@ const styles = {
   heroContainer: { marginBottom: 4, flexShrink: 0 },
   heroCard: {
     background: "linear-gradient(to right,  #cac6caff, #f5bdc4ff, #fff7ed)",
-    padding: "6px 10px",
+    padding: "10px 14px",
     borderRadius: "18px",
   },
   latestVideoCard: {
     borderRadius: 16,
     border: "1px solid #d6c9ff",
     background: "#f8f5ff",
-    padding: "6px 10px",
-    marginBottom: 4,
+    padding: "8px 10px",
+    marginBottom: 10,
     display: "flex",
     flexDirection: "column",
-    gap: 2,
+    gap: 6,
   },
   latestVideoPlayerWrapper: {
     marginTop: 8,
@@ -5314,12 +5319,12 @@ const styles = {
   latestVideoRow: {
     display: "flex",
     alignItems: "center",
-    gap: 6,
+    gap: 8,
     flexWrap: "nowrap",
     whiteSpace: "nowrap",
   },
   latestVideoLabel: {
-    fontSize: "16px",
+    fontSize: "14px",
     fontWeight: 700,
     margin: 0,
     color: "#111827",
@@ -5333,7 +5338,7 @@ const styles = {
     color: "#0066cc",
     textDecoration: "underline",
     cursor: "pointer",
-    fontSize: "16px",
+    fontSize: "14px",
     fontWeight: 500,
     lineHeight: 1.2,
     fontFamily: "inherit",
@@ -5461,17 +5466,17 @@ const styles = {
     alignItems: "center",
     gap: 6,
   },
-  heroContent: { display: "flex", alignItems: "center", gap: 14 },
+  heroContent: { display: "flex", alignItems: "center", gap: 12 },
   logo: {
-    width: 60,
-    height: 60,
+    width: 52,
+    height: 52,
     borderRadius: 14,
     objectFit: "cover",
   },
-  heroTitle: { fontSize: 26, fontWeight: 700, margin: 0 },
+  heroTitle: { fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: "-0.2px" },
 
   scrollArea: {
-    marginTop: 16,
+    marginTop: 12,
     overflowY: "auto",
     overflowX: "hidden",
     flex: "1 1 auto",
@@ -5481,25 +5486,25 @@ const styles = {
     paddingBottom: 4,
   },
 
-  helpHeading: { fontSize: 18, marginBottom: 2, marginTop: 0, flexShrink: 0, fontWeight: 700, color: "#1e293b" },
-  mainHeading: { fontSize: 16, marginBottom: 4, marginTop: 0, flexShrink: 0, fontWeight: 400, color: "#1e293b" },
-  sectionHeading: { fontSize: 20, marginBottom: 2, marginTop: 0, flexShrink: 0, fontWeight: 600 },
-  sectionDescription: { fontSize: 15, color: "#555", marginBottom: 4, flexShrink: 0, marginTop: 0 },
+  helpHeading: { fontSize: 16, marginBottom: 2, marginTop: 0, flexShrink: 0, fontWeight: 700, color: "#1e293b", lineHeight: 1.25 },
+  mainHeading: { fontSize: 14, marginBottom: 6, marginTop: 0, flexShrink: 0, fontWeight: 400, color: "#1e293b", lineHeight: 1.35 },
+  sectionHeading: { fontSize: 16, marginBottom: 2, marginTop: 0, flexShrink: 0, fontWeight: 650, lineHeight: 1.25 },
+  sectionDescription: { fontSize: 13, color: "#555", marginBottom: 8, flexShrink: 0, marginTop: 0, lineHeight: 1.35 },
   contentSection: { marginBottom: 4, flexShrink: 0 },
 
-  actionList: { display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 },
+  actionList: { display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 },
   actionButton: {
     display: "flex",
     alignItems: "center",
-    gap: 6,
-    padding: "8px 12px",
-    borderRadius: 14,
+    gap: 8,
+    padding: "10px 12px",
+    borderRadius: 12,
     border: "1px solid #ececec",
     cursor: "pointer",
     background: "#fff",
     transition: "all .2s",
     flexShrink: 0,
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: 500,
   },
   actionButtonActive: {
@@ -5508,8 +5513,8 @@ const styles = {
   },
 
   actionIconWrapper: {
-    width: 32,
-    height: 32,
+    width: 28,
+    height: 28,
     borderRadius: 10,
     display: "flex",
     alignItems: "center",
@@ -5550,40 +5555,40 @@ const styles = {
     WebkitBoxOrient: "vertical",
   },
 
-  textareaLabel: { fontSize: 15, marginBottom: 10, display: "block", flexShrink: 0, marginTop: 0, fontWeight: 500 },
+  textareaLabel: { fontSize: 14, marginBottom: 8, display: "block", flexShrink: 0, marginTop: 0, fontWeight: 600, color: "#111827" },
   textarea: {
     width: "100%",
-    height: 110,
-    minHeight: 110,
-    maxHeight: 110,
-    padding: 14,
-    borderRadius: 14,
+    height: 96,
+    minHeight: 96,
+    maxHeight: 96,
+    padding: 12,
+    borderRadius: 12,
     border: "1px solid #ddd",
     background: "#f8f9ff",
     resize: "none",
     flexShrink: 0,
     fontFamily: "inherit",
-    fontSize: 15,
+    fontSize: 14,
     boxSizing: "border-box",
   },
   textareaFooter: {
-    marginTop: 12,
+    marginTop: 10,
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
     flexShrink: 0,
-    fontSize: 14,
+    fontSize: 13,
   },
 
   generateButton: {
-    padding: "12px 30px",
+    padding: "10px 24px",
     borderRadius: 999,
     border: "none",
     cursor: "pointer",
     display: "flex",
     alignItems: "center",
-    gap: 12,
-    fontSize: 15,
+    gap: 10,
+    fontSize: 14,
     fontWeight: 600,
     color: "#fff",
     transition: "transform 0.2s ease, box-shadow 0.2s ease",
@@ -5944,6 +5949,32 @@ const styles = {
     maxHeight: "85vh",
     overflowY: "auto",
     boxShadow: "0 25px 55px rgba(15, 23, 42, 0.25)",
+    position: "relative",
+    textAlign: "left",
+  },
+  // Smaller card used only for the "Your video is ready!" completion popup
+  videoCompletionCard: {
+    background: "#fff",
+    borderRadius: 18,
+    padding: "16px 18px",
+    maxWidth: 520,
+    width: "90%",
+    maxHeight: "75vh",
+    overflowY: "auto",
+    boxShadow: "0 22px 45px rgba(15, 23, 42, 0.22)",
+    position: "relative",
+    textAlign: "left",
+  },
+  // Smaller card used only for the "Golpo AI Video" player modal (keeps other popups unchanged)
+  videoPlayerCard: {
+    background: "#fff",
+    borderRadius: 18,
+    padding: "14px 16px",
+    maxWidth: 420,
+    width: "88%",
+    maxHeight: "70vh",
+    overflowY: "auto",
+    boxShadow: "0 22px 45px rgba(15, 23, 42, 0.22)",
     position: "relative",
     textAlign: "left",
   },
