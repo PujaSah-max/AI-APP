@@ -1231,19 +1231,94 @@ resolver.define('generateVideo', async ({ payload }) => {
     const jobId = data?.job_id || data?.jobId || data?.id || data?.data?.job_id || data?.data?.jobId;
     const pageId = document?.pageId || document?.metadata?.pageId;
 
-    // Store creditsBefore with jobId for later use when video completes
-    if (jobId) {
-      try {
-        const jobCreditsKey = `golpo-job-credits-${jobId}`;
-        await storage.set(jobCreditsKey, {
-          creditsBefore: creditsBefore,
-          apiKey: API_KEY,
-          createdAt: new Date().toISOString()
-        });
-        console.log(`[resolver:generateVideo] Stored credits before (${creditsBefore}) for job ${jobId}`);
-      } catch (error) {
-        console.warn('[resolver:generateVideo] Failed to store credits before for job:', error);
+    // Fetch creditsAfter immediately after video generation API call (credits are deducted at this point)
+    let creditsAfter = 0;
+    try {
+      const creditsResponseAfter = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY,
+        },
+      });
+      
+      if (creditsResponseAfter.ok) {
+        const creditsDataAfter = await creditsResponseAfter.json();
+        creditsAfter = creditsDataAfter.current_credits !== undefined && creditsDataAfter.current_credits !== null
+          ? creditsDataAfter.current_credits
+          : (creditsDataAfter.credits !== undefined && creditsDataAfter.credits !== null
+            ? creditsDataAfter.credits
+            : 0);
+        console.log('[resolver:generateVideo] Credits after generation (current_credits):', creditsAfter);
       }
+    } catch (error) {
+      console.warn('[resolver:generateVideo] Failed to fetch credits after generation:', error);
+    }
+
+    // Calculate credits difference and store in history immediately
+    if (jobId && creditsBefore > 0 && creditsAfter >= 0) {
+      try {
+        const creditsBeforeNum = Number(creditsBefore) || 0;
+        const creditsAfterNum = Number(creditsAfter) || 0;
+        const creditsDifference = creditsBeforeNum - creditsAfterNum;
+        
+        console.log('[resolver:generateVideo] Credits calculation:', {
+          creditsBefore: creditsBeforeNum,
+          creditsAfter: creditsAfterNum,
+          difference: creditsDifference
+        });
+        
+        // Only store if we have valid values and difference is positive
+        if (!isNaN(creditsDifference) && isFinite(creditsDifference) && creditsDifference > 0) {
+          // Get masked API key for storage
+          const maskedKey = API_KEY.length > 8 
+            ? `${API_KEY.substring(0, 4)}${'*'.repeat(Math.max(0, API_KEY.length - 8))}${API_KEY.substring(API_KEY.length - 4)}`
+            : '****';
+          
+          // Store credit usage history record
+          const historyStorageKey = 'golpo-credit-usage-history';
+          let historyArray = [];
+          try {
+            const existingHistory = await storage.get(historyStorageKey);
+            if (Array.isArray(existingHistory)) {
+              historyArray = existingHistory;
+            }
+          } catch (error) {
+            console.warn('[resolver:generateVideo] Error reading history data:', error);
+          }
+          
+          // Check if this jobId already exists in history (prevent duplicates)
+          const existingIndex = historyArray.findIndex(h => h.jobId === jobId);
+          const historyRecord = {
+            jobId: jobId,
+            apiKey: maskedKey,
+            creditsBefore: creditsBeforeNum,
+            creditsAfter: creditsAfterNum,
+            creditsUsed: creditsDifference,
+            timestamp: new Date().toISOString()
+          };
+          
+          if (existingIndex >= 0) {
+            // Update existing record
+            historyArray[existingIndex] = historyRecord;
+            console.log('[resolver:generateVideo] Updated existing history record for job:', jobId);
+          } else {
+            // Add new record
+            historyArray.push(historyRecord);
+            console.log('[resolver:generateVideo] Added new history record for job:', jobId);
+          }
+          
+          // Store updated history
+          await storage.set(historyStorageKey, historyArray);
+          console.log(`[resolver:generateVideo] Stored credit usage history record: ${creditsBeforeNum} - ${creditsAfterNum} = ${creditsDifference}`);
+        } else {
+          console.warn('[resolver:generateVideo] Invalid credits difference calculated:', creditsDifference);
+        }
+      } catch (error) {
+        console.error('[resolver:generateVideo] Error calculating and storing credits usage:', error);
+      }
+    } else {
+      console.warn('[resolver:generateVideo] Skipping credits tracking - missing jobId or invalid credits values');
     }
 
     // If we have a jobId and pageId, store job info in Forge storage for background polling
@@ -1538,141 +1613,8 @@ resolver.define('getVideoStatus', async ({ payload }) => {
     const data = await response.json();
     console.log('[resolver:getVideoStatus] Status response:', JSON.stringify(data, null, 2));
 
-    // Retrieve creditsBefore from storage before checking if status is completed
-    let creditsBefore = 0;
-    let jobCreditsData = null;
-    let jobCreditsKey = null;
-    if (jobId) {
-      try {
-        jobCreditsKey = `golpo-job-credits-${jobId}`;
-        jobCreditsData = await storage.get(jobCreditsKey);
-        
-        if (jobCreditsData && jobCreditsData.creditsBefore !== undefined && jobCreditsData.creditsBefore !== null) {
-          creditsBefore = Number(jobCreditsData.creditsBefore) || 0;
-          console.log('[resolver:getVideoStatus] Retrieved credits before:', creditsBefore);
-        }
-      } catch (error) {
-        console.warn('[resolver:getVideoStatus] Failed to retrieve credits before:', error);
-      }
-    }
-
-    // Check if video is completed and track credits usage
-    const videoStatus = data?.status || data?.state || data?.body?.status || '';
-    const statusLower = videoStatus.toLowerCase();
-    const isCompleted = statusLower === 'completed' || 
-                       statusLower === 'ready' || 
-                       statusLower === 'success' || 
-                       statusLower === 'finished' || 
-                       statusLower === 'done' ||
-                       statusLower === 'complete';
-
-    // Fetch current_credits when video is completed (this is the creditsAfter value)
-    let creditsAfter = 0;
-    if (isCompleted && jobId) {
-      try {
-        const creditsResponseAfter = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': API_KEY,
-          },
-        });
-        
-        if (creditsResponseAfter.ok) {
-          const creditsDataAfter = await creditsResponseAfter.json();
-          // Use current_credits as primary (this is the field that updates after every video generation)
-          creditsAfter = creditsDataAfter.current_credits !== undefined && creditsDataAfter.current_credits !== null
-            ? creditsDataAfter.current_credits
-            : (creditsDataAfter.credits !== undefined && creditsDataAfter.credits !== null
-              ? creditsDataAfter.credits
-              : 0);
-          console.log('[resolver:getVideoStatus] Credits after generation (current_credits):', creditsAfter);
-        }
-      } catch (error) {
-        console.warn('[resolver:getVideoStatus] Failed to fetch credits after generation:', error);
-      }
-      
-      // Check if credits have already been tracked for this job to avoid duplicate processing
-      const alreadyTracked = jobCreditsData && jobCreditsData.creditsTracked === true;
-      if (alreadyTracked) {
-        console.log('[resolver:getVideoStatus] Credits already tracked for job:', jobId);
-      }
-      
-      // Calculate difference using creditsBefore (already retrieved) and creditsAfter
-      // Only process if not already tracked and we have valid values
-      if (!alreadyTracked && creditsBefore > 0 && creditsAfter > 0) {
-        try {
-          const creditsAfterNum = Number(creditsAfter) || 0;
-          const creditsBeforeNum = Number(creditsBefore) || 0;
-          
-          // Calculate the difference
-          const creditsDifference = creditsBeforeNum - creditsAfterNum;
-          console.log('[resolver:getVideoStatus] Credits calculation:', {
-            creditsBefore: creditsBeforeNum,
-            creditsAfter: creditsAfterNum,
-            difference: creditsDifference
-          });
-          
-          // Only proceed if we have valid values and difference is positive
-          if (!isNaN(creditsDifference) && isFinite(creditsDifference) && creditsDifference > 0) {
-            // Get masked API key for storage
-            const maskedKey = API_KEY.length > 8 
-              ? `${API_KEY.substring(0, 4)}${'*'.repeat(Math.max(0, API_KEY.length - 8))}${API_KEY.substring(API_KEY.length - 4)}`
-              : '****';
-            
-            // Store credit usage history record
-            const historyStorageKey = 'golpo-credit-usage-history';
-            let historyArray = [];
-            try {
-              const existingHistory = await storage.get(historyStorageKey);
-              if (Array.isArray(existingHistory)) {
-                historyArray = existingHistory;
-              }
-            } catch (error) {
-              console.warn('[resolver:getVideoStatus] Error reading history data:', error);
-            }
-            
-            // Check if this jobId already exists in history (prevent duplicates)
-            const existingIndex = historyArray.findIndex(h => h.jobId === jobId);
-            const historyRecord = {
-              jobId: jobId,
-              apiKey: maskedKey,
-              creditsBefore: creditsBeforeNum,
-              creditsAfter: creditsAfterNum,
-              creditsUsed: creditsDifference,
-              timestamp: new Date().toISOString()
-            };
-            
-            if (existingIndex >= 0) {
-              // Update existing record
-              historyArray[existingIndex] = historyRecord;
-              console.log('[resolver:getVideoStatus] Updated existing history record for job:', jobId);
-            } else {
-              // Add new record
-              historyArray.push(historyRecord);
-              console.log('[resolver:getVideoStatus] Added new history record for job:', jobId);
-            }
-            
-            // Store updated history
-            await storage.set(historyStorageKey, historyArray);
-            console.log(`[resolver:getVideoStatus] Stored credit usage history record: ${creditsBeforeNum} - ${creditsAfterNum} = ${creditsDifference}`);
-            
-            // Mark this job as tracked BEFORE updating usage to prevent race conditions
-            if (jobCreditsData && jobCreditsKey) {
-              jobCreditsData.creditsTracked = true;
-              await storage.set(jobCreditsKey, jobCreditsData);
-              console.log('[resolver:getVideoStatus] Marked job as tracked:', jobId);
-            }
-          } else {
-            console.warn('[resolver:getVideoStatus] Invalid credits difference calculated:', creditsDifference);
-          }
-        } catch (error) {
-          console.error('[resolver:getVideoStatus] Error calculating and storing credits usage:', error);
-        }
-      } else {
-        console.warn('[resolver:getVideoStatus] creditsBefore or creditsAfter is 0, skipping calculation');
-      }
-    }
+    // Credits tracking is now done immediately after video generation starts in generateVideo resolver
+    // Credits are deducted when the video generation API call is made, so we track usage right after that
 
     return {
       status: response.status,
