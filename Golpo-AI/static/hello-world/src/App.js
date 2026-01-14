@@ -59,7 +59,10 @@ const languageOptions = [
 ];
 // Polling too frequently causes excessive re-renders in the Confluence iframe.
 // Keep this comfortably slow; backend polling continues separately.
-const VIDEO_STATUS_POLL_INTERVAL = 12000; // ms
+const VIDEO_STATUS_POLL_INTERVAL = 60000; // ms
+
+// Completion/background status checks should also be slow to keep the page responsive.
+const COMPLETION_CHECK_INTERVAL = 60000; // ms
 
 // Helper to strip HTML/markup for summaries
 const stripMarkup = (html) => {
@@ -734,6 +737,9 @@ function App() {
   // Prevent overlapping polls + reduce re-renders from setting identical status text
   const pollInFlightRef = useRef(false);
   const lastStatusTextRef = useRef("");
+  const completionInFlightRef = useRef(false);
+  const activeCompletionJobIdRef = useRef(null);
+  const lastCompletionStatusRef = useRef("");
   const [showVideoFailureModal, setShowVideoFailureModal] = useState(false);
   const [videoFailureMessage, setVideoFailureMessage] = useState("");
   const [isFullscreenVideo, setIsFullscreenVideo] = useState(false);
@@ -1594,11 +1600,11 @@ function App() {
   useEffect(() => {
     if (!showVideoPlayerModal) return;
     const video = videoElementRef.current;
-    if (!video) return;
+      if (!video) return;
 
     const checkInterval = setInterval(() => {
       const currentSrc = video.src || video.getAttribute("src") || "";
-
+      
       // If video element has S3 URL, clear it immediately
       if (currentSrc && (currentSrc.includes("s3.amazonaws.com") || currentSrc.includes("s3.us-east-2.amazonaws.com"))) {
         console.error("[GolpoAI] MONITOR: Video element has S3 URL! Clearing immediately:", currentSrc);
@@ -1607,8 +1613,8 @@ function App() {
           video.setAttribute("src", "");
           video.removeAttribute("src");
           video.load();
-          setVideoPlayerUrl(null);
-
+      setVideoPlayerUrl(null);
+          
           // Retry with prepareVideoSource if we have a video URL
           if (videoReadyInfo?.videoUrl && !videoReadyInfo.videoUrl.includes("s3.")) {
             // Only retry if it's not already an S3 URL (to avoid infinite loop)
@@ -1621,7 +1627,7 @@ function App() {
         }
       }
     }, 1000); // Check every 1s (was 100ms)
-
+    
     return () => clearInterval(checkInterval);
   }, [showVideoPlayerModal, videoReadyInfo?.videoUrl, prepareVideoSource]);
 
@@ -1892,17 +1898,16 @@ function App() {
                   localStorage.removeItem('golpo_video_page_id');
                   localStorage.setItem('golpo_last_seen_video_url', videoUrl);
                   
-                  // Update state and show completion popup
+                  // Update state and show completion popup (avoid flicker: show modal first, then close loading)
                   setLatestVideoUrl(videoUrl);
                   setCompletedVideoUrl(videoUrl);
-                  setIsGeneratingVideo(false);
-                  setVideoStatusMessage("");
-                  
-                  // Show completion popup after a brief delay to prevent flicker
-                  setTimeout(() => {
-                    setShowVideoCompletionModal(true);
-                    console.log("[GolpoAI] Completion popup shown for already-completed video");
-                  }, 100);
+                  setShowVideoCompletionModal(true);
+                  requestAnimationFrame(() => {
+                    setIsGeneratingVideo(false);
+                    setIsPollingVideoStatus(false);
+                    setVideoStatusMessage("");
+                  });
+                  console.log("[GolpoAI] Completion popup shown for already-completed video");
                 } else {
                   // No URL found - just clear localStorage
                   console.log("[GolpoAI] Video already completed but no URL found, clearing stored job");
@@ -1918,8 +1923,8 @@ function App() {
                 console.log("[GolpoAI] Video generation failed during restore. Status:", status, "Timeout:", isTimeout);
 
                 try {
-                  localStorage.removeItem('golpo_video_job_id');
-                  localStorage.removeItem('golpo_video_page_id');
+                localStorage.removeItem('golpo_video_job_id');
+                localStorage.removeItem('golpo_video_page_id');
                   localStorage.removeItem('golpo_video_job_start_ts');
                 } catch (e) {}
 
@@ -1964,17 +1969,20 @@ function App() {
           setVideoStatusMessage("Processing");
           
           // Start polling for status updates
-          if (completionCheckIntervalRef.current) {
+          if (completionCheckIntervalRef.current && activeCompletionJobIdRef.current !== storedJobId) {
             clearInterval(completionCheckIntervalRef.current);
+            completionCheckIntervalRef.current = null;
           }
+          activeCompletionJobIdRef.current = storedJobId;
           
           const checkForCompletion = async () => {
+            if (completionInFlightRef.current) return;
+            completionInFlightRef.current = true;
             try {
               const statusResponse = await safeInvoke("getVideoStatus", { jobId: storedJobId });
               const statusPayload = statusResponse?.body || statusResponse;
               
               if (!statusPayload) {
-                console.log("[GolpoAI] No status response received");
                 return;
               }
 
@@ -1988,25 +1996,26 @@ function App() {
                             statusPayload?.state || 
                             "";
               
-              console.log("[GolpoAI] Video status check:", status);
-              
               // Check if video is ready
               if (isSuccessStatus(status)) {
                 // Extract video URL from status response
                 const videoUrl = extractVideoUrlFromPayload(statusPayload);
                 
                 if (videoUrl) {
-                  console.log("[GolpoAI] ✅ Video completed! URL:", videoUrl);
-                  
                   // Clear the interval first
                   if (completionCheckIntervalRef.current) {
                     clearInterval(completionCheckIntervalRef.current);
                     completionCheckIntervalRef.current = null;
                   }
+                  activeCompletionJobIdRef.current = null;
+                  lastCompletionStatusRef.current = "";
                   
                   // Clear generation result and show completion
                   setVideoGenerationResult(null);
-                  setVideoStatusMessage("Complete");
+                  if (lastStatusTextRef.current !== "Status: Complete") {
+                    lastStatusTextRef.current = "Status: Complete";
+                    setVideoStatusMessage("Status: Complete");
+                  }
                   
                   // Wait a moment, then show completion popup
                   // Even if modal was dismissed, show completion popup when video is ready
@@ -2017,9 +2026,9 @@ function App() {
                     
                     // Use requestAnimationFrame to ensure smooth transition
                     requestAnimationFrame(() => {
-                      setIsGeneratingVideo(false);
-                      setIsPollingVideoStatus(false);
-                      setVideoStatusMessage("");
+                    setIsGeneratingVideo(false);
+                    setIsPollingVideoStatus(false);
+                    setVideoStatusMessage("");
                     });
                     
                     localStorage.removeItem('golpo_video_job_id');
@@ -2032,16 +2041,16 @@ function App() {
                     modalDismissedRef.current = false;
                   }, 2000);
                 } else {
-                  console.log("[GolpoAI] Video status is complete but no URL found");
+                  // no-op
                 }
               } else if (isFailureStatus(status)) {
-                console.log("[GolpoAI] Video generation failed with status:", status);
-                
                 // Clear the interval on failure
                 if (completionCheckIntervalRef.current) {
                   clearInterval(completionCheckIntervalRef.current);
                   completionCheckIntervalRef.current = null;
                 }
+                activeCompletionJobIdRef.current = null;
+                lastCompletionStatusRef.current = "";
                 
                 setVideoGenerationResult(null);
                 setIsGeneratingVideo(false);
@@ -2049,8 +2058,8 @@ function App() {
                 setVideoStatusMessage("");
 
                 try {
-                  localStorage.removeItem('golpo_video_job_id');
-                  localStorage.removeItem('golpo_video_page_id');
+                localStorage.removeItem('golpo_video_job_id');
+                localStorage.removeItem('golpo_video_page_id');
                   localStorage.removeItem('golpo_video_job_start_ts');
                 } catch (e) {}
 
@@ -2065,29 +2074,31 @@ function App() {
                 );
                 setShowVideoFailureModal(true);
               } else {
-                // Still processing - polling continues in background
-                // Only update UI if modal is still open (not dismissed)
+                // Still processing - update UI only if value actually changed (prevents re-render storms)
                 if (!modalDismissedRef.current) {
-                  console.log("[GolpoAI] Video still processing, status:", status);
-                  setVideoGenerationResult({
-                    job_id: storedJobId,
-                    status: status || "processing"
-                  });
-                  setVideoStatusMessage("Status: Processing - Video generation in progress...");
-                } else {
-                  // Modal was dismissed - polling continues but doesn't update UI or reopen modal
-                  console.log("[GolpoAI] Video still processing (polling continues in background, modal stays closed)");
+                  const next = (status || "processing").toLowerCase();
+                  if (lastCompletionStatusRef.current !== next) {
+                    lastCompletionStatusRef.current = next;
+                    setVideoGenerationResult({ job_id: storedJobId, status: next });
+                  }
+                  if (lastStatusTextRef.current !== "Status: Processing") {
+                    lastStatusTextRef.current = "Status: Processing";
+                    setVideoStatusMessage("Status: Processing");
+                  }
                 }
               }
             } catch (error) {
-              console.warn("[GolpoAI] Error checking video status:", error);
+              // swallow; next tick will retry
+            } finally {
+              completionInFlightRef.current = false;
             }
           };
           
-          // Check immediately and then every 15 seconds
-          console.log("[GolpoAI] Starting status check interval for restored job:", storedJobId);
+          // Check immediately and then periodically (single interval only)
           checkForCompletion();
-          completionCheckIntervalRef.current = setInterval(checkForCompletion, 15000);
+          if (!completionCheckIntervalRef.current) {
+            completionCheckIntervalRef.current = setInterval(checkForCompletion, COMPLETION_CHECK_INTERVAL);
+          }
         }
       } catch (error) {
         console.warn("[GolpoAI] Error restoring video generation status:", error);
@@ -2104,8 +2115,8 @@ function App() {
       try {
         // Prefer resolver (contentAction) but fallback to getContext()/URL (contentBylineItem)
         let pageId = null;
-        try {
-          const pageInfo = await safeInvoke("getCurrentPage", {});
+      try {
+        const pageInfo = await safeInvoke("getCurrentPage", {});
           pageId = pageInfo?.id || pageInfo?.pageId || null;
         } catch (e) {
           // ignore and fallback below
@@ -2264,9 +2275,9 @@ function App() {
             });
           } else {
             console.log("[GolpoAI] handleVideoReady: Not showing completion popup - on different page");
-            setIsGeneratingVideo(false);
-            setIsPollingVideoStatus(false);
-            setVideoStatusMessage("");
+          setIsGeneratingVideo(false);
+          setIsPollingVideoStatus(false);
+          setVideoStatusMessage("");
           }
         }, 1500); // Show "Complete" status for 1.5 seconds
       }
@@ -2453,7 +2464,7 @@ function App() {
             setShowVideoFailureModal(true);
           } else {
             // For other failures, show error message
-            setError("Video generation failed. Please try again.");
+          setError("Video generation failed. Please try again.");
           }
           return;
         }
@@ -3140,6 +3151,11 @@ function App() {
                       console.log("[GolpoAI] Video generation completed while user was away! Showing popup");
                       setCompletedVideoUrl(latestUrl);
                       setShowVideoCompletionModal(true);
+                      requestAnimationFrame(() => {
+                        setIsGeneratingVideo(false);
+                        setIsPollingVideoStatus(false);
+                        setVideoStatusMessage("");
+                      });
                       // Clear stored job ID since video is complete
                       localStorage.removeItem('golpo_video_job_id');
                       localStorage.removeItem('golpo_video_page_id');
@@ -3166,17 +3182,20 @@ function App() {
                     setVideoStatusMessage("Status: Processing - Video generation in progress...");
                     
                     // Start polling for status updates using the same pattern as handleGenerateVideo
-                    if (completionCheckIntervalRef.current) {
+                    if (completionCheckIntervalRef.current && activeCompletionJobIdRef.current !== storedJobId) {
                       clearInterval(completionCheckIntervalRef.current);
+                      completionCheckIntervalRef.current = null;
                     }
+                    activeCompletionJobIdRef.current = storedJobId;
                     
                     const checkForCompletion = async () => {
+                      if (completionInFlightRef.current) return;
+                      completionInFlightRef.current = true;
                       try {
                         const statusResponse = await safeInvoke("getVideoStatus", { jobId: storedJobId });
                         const statusPayload = statusResponse?.body || statusResponse;
                         
                         if (!statusPayload) {
-                          console.log("[GolpoAI] No status response received");
                           return;
                         }
                         
@@ -3190,25 +3209,26 @@ function App() {
                         // NOTE: Timeout is handled server-side via getVideoStatus returning status: "timeout".
                         // We intentionally do not do a separate client-side 1h timer here to avoid conflicting behaviour.
                         
-                        console.log("[GolpoAI] Video status check:", status);
-                        
                         // Check if video is ready
                         if (isSuccessStatus(status)) {
                           // Extract video URL from status response
                           const videoUrl = extractVideoUrlFromPayload(statusPayload);
                           
                           if (videoUrl) {
-                            console.log("[GolpoAI] ✅ Video completed! URL:", videoUrl);
-                            
                             // Clear the interval first
                             if (completionCheckIntervalRef.current) {
                               clearInterval(completionCheckIntervalRef.current);
                               completionCheckIntervalRef.current = null;
                             }
+                            activeCompletionJobIdRef.current = null;
+                            lastCompletionStatusRef.current = "";
                             
                             // Clear generation result and show completion
                             setVideoGenerationResult(null);
-                            setVideoStatusMessage("Status: Complete");
+                            if (lastStatusTextRef.current !== "Status: Complete") {
+                              lastStatusTextRef.current = "Status: Complete";
+                              setVideoStatusMessage("Status: Complete");
+                            }
                             
                             // Wait a moment, then show completion popup
                             setTimeout(() => {
@@ -3218,8 +3238,8 @@ function App() {
                               
                               // Use requestAnimationFrame to ensure smooth transition
                               requestAnimationFrame(() => {
-                                setIsGeneratingVideo(false);
-                                setVideoStatusMessage("");
+                              setIsGeneratingVideo(false);
+                              setVideoStatusMessage("");
                               });
                               
                               localStorage.removeItem('golpo_video_job_id');
@@ -3230,16 +3250,16 @@ function App() {
                               // Don't reload - let user see the popup and manually refresh if needed
                             }, 2000);
                           } else {
-                            console.log("[GolpoAI] Video status is complete but no URL found");
+                            // no-op
                           }
                         } else if (isFailureStatus(status)) {
-                          console.log("[GolpoAI] Video generation failed with status:", status);
-                          
                           // Clear the interval on failure
                           if (completionCheckIntervalRef.current) {
                             clearInterval(completionCheckIntervalRef.current);
                             completionCheckIntervalRef.current = null;
                           }
+                          activeCompletionJobIdRef.current = null;
+                          lastCompletionStatusRef.current = "";
                           
                           setVideoGenerationResult(null);
                           setIsGeneratingVideo(false);
@@ -3247,8 +3267,8 @@ function App() {
                           setVideoStatusMessage("");
 
                           try {
-                            localStorage.removeItem('golpo_video_job_id');
-                            localStorage.removeItem('golpo_video_page_id');
+                          localStorage.removeItem('golpo_video_job_id');
+                          localStorage.removeItem('golpo_video_page_id');
                             localStorage.removeItem('golpo_video_job_start_ts');
                           } catch (e) {}
 
@@ -3264,22 +3284,28 @@ function App() {
                           setShowVideoFailureModal(true);
                         } else {
                           // Still processing - update status message
-                          console.log("[GolpoAI] Video still processing, status:", status);
-                          setVideoGenerationResult({
-                            job_id: storedJobId,
-                            status: status || "processing"
-                          });
-                          setVideoStatusMessage("Status: Processing - Video generation in progress...");
+                          const next = (status || "processing").toLowerCase();
+                          if (lastCompletionStatusRef.current !== next) {
+                            lastCompletionStatusRef.current = next;
+                            setVideoGenerationResult({ job_id: storedJobId, status: next });
+                          }
+                          if (lastStatusTextRef.current !== "Status: Processing") {
+                            lastStatusTextRef.current = "Status: Processing";
+                            setVideoStatusMessage("Status: Processing");
+                          }
                         }
                       } catch (error) {
-                        console.warn("[GolpoAI] Error checking video status:", error);
+                        // swallow; next tick will retry
+                      } finally {
+                        completionInFlightRef.current = false;
                       }
                     };
                     
-                    // Check immediately and then every 15 seconds
-                    console.log("[GolpoAI] Starting status check interval for restored job:", storedJobId);
+                    // Check immediately and then periodically (single interval only)
                     checkForCompletion();
-                    completionCheckIntervalRef.current = setInterval(checkForCompletion, 15000);
+                    if (!completionCheckIntervalRef.current) {
+                      completionCheckIntervalRef.current = setInterval(checkForCompletion, COMPLETION_CHECK_INTERVAL);
+                    }
                   }
                 }
               }
@@ -3869,29 +3895,27 @@ function App() {
         }
         
         // Start checking for completion periodically (every 15 seconds)
-        if (completionCheckIntervalRef.current) {
+        if (completionCheckIntervalRef.current && activeCompletionJobIdRef.current !== generatedJobId) {
           clearInterval(completionCheckIntervalRef.current);
+          completionCheckIntervalRef.current = null;
         }
-        console.log("[GolpoAI] Starting completion check interval for job:", generatedJobId, "Initial URL:", initialUrl);
+        activeCompletionJobIdRef.current = generatedJobId;
         
         // Define the check function to reuse it
         const checkForCompletion = async () => {
+          if (completionInFlightRef.current) return;
+          completionInFlightRef.current = true;
           try {
             // Get current videoJobId from state (it might have changed)
             const currentJobId = videoJobId || generatedJobId;
             if (!currentJobId) {
-              console.log("[GolpoAI] No job ID available, skipping completion check");
               return;
             }
-            
-            console.log("[GolpoAI] Checking video status from Golpo API, jobId:", currentJobId);
-            
             // Check video status directly from Golpo API instead of comments
             const statusResponse = await safeInvoke("getVideoStatus", { jobId: currentJobId });
             const statusPayload = statusResponse?.body || statusResponse;
             
             if (!statusPayload) {
-              console.log("[GolpoAI] No status response received");
               return;
             }
             
@@ -3902,36 +3926,33 @@ function App() {
                           statusPayload?.state || 
                           "";
             
-            console.log("[GolpoAI] Video status:", status);
-            
             // Check if video is ready
             if (isSuccessStatus(status)) {
               // Extract video URL from status response
               const videoUrl = extractVideoUrlFromPayload(statusPayload);
               
               if (videoUrl) {
-                console.log("[GolpoAI] ✅ Video completed! URL:", videoUrl);
-                
                 // Update state with video URL
                 setLatestVideoUrl(videoUrl);
                 setCompletedVideoUrl(videoUrl);
                 
                 // Update status to "Complete" immediately - keep loader visible with this status
-                setVideoStatusMessage("Status: Complete");
-                console.log("[GolpoAI] Status updated to Complete");
+                if (lastStatusTextRef.current !== "Status: Complete") {
+                  lastStatusTextRef.current = "Status: Complete";
+                  setVideoStatusMessage("Status: Complete");
+                }
                 
                 // Clear the interval first to prevent multiple triggers
                 if (completionCheckIntervalRef.current) {
                   clearInterval(completionCheckIntervalRef.current);
                   completionCheckIntervalRef.current = null;
                 }
+                activeCompletionJobIdRef.current = null;
+                lastCompletionStatusRef.current = "";
                 
                 // Always show completion popup when video is generated (only if on correct page)
                 // Wait 2 seconds to show "Status: Complete" in loader, then show completion popup
                 setTimeout(async () => {
-                  console.log("[GolpoAI] Checking if should show completion popup");
-                  console.log("[GolpoAI] completedVideoUrl:", videoUrl);
-                  
                   // Check if we're on the correct page before showing popup
                   const storedPageId = localStorage.getItem('golpo_video_page_id');
                   let onCorrectPage = true;
@@ -3941,16 +3962,12 @@ function App() {
                       const pageInfo = await safeInvoke("getCurrentPage", {});
                       const currentPageId = pageInfo?.id || pageInfo?.pageId || null;
                       onCorrectPage = currentPageId === storedPageId;
-                      console.log("[GolpoAI] Page check - Current:", currentPageId, "Stored:", storedPageId, "Match:", onCorrectPage);
                     } catch (pageError) {
-                      console.warn("[GolpoAI] Could not check page ID, allowing popup:", pageError);
                       onCorrectPage = true; // Allow popup on error
                     }
                   }
                   
                   if (onCorrectPage) {
-                    console.log("[GolpoAI] Setting showVideoCompletionModal to true");
-                    
                     // Clear localStorage
                     localStorage.removeItem('golpo_video_job_id');
                     localStorage.removeItem('golpo_video_page_id');
@@ -3964,15 +3981,13 @@ function App() {
                     
                     // Use requestAnimationFrame to ensure smooth transition
                     requestAnimationFrame(() => {
-                      setIsGeneratingVideo(false);
-                      setIsPollingVideoStatus(false);
+                    setIsGeneratingVideo(false);
+                    setIsPollingVideoStatus(false);
                       setVideoStatusMessage("");
                     });
                     
                     previousLatestUrlRef.current = videoUrl;
-                    console.log("[GolpoAI] Completion popup should now be visible");
                   } else {
-                    console.log("[GolpoAI] Not showing completion popup - on different page");
                     // Still clear localStorage and update state, just don't show popup
                     localStorage.removeItem('golpo_video_job_id');
                     localStorage.removeItem('golpo_video_page_id');
@@ -3985,28 +4000,42 @@ function App() {
                   }
                 }, 2000); // Show "Complete" status for 2 seconds, then show completion popup
               } else {
-                console.log("[GolpoAI] Video status is complete but no URL found in response");
+                // no-op
               }
             } else if (isFailureStatus(status)) {
-              console.log("[GolpoAI] Video generation failed with status:", status);
-              setVideoStatusMessage("Status: Failed");
+              if (lastStatusTextRef.current !== "Status: Failed") {
+                lastStatusTextRef.current = "Status: Failed";
+                setVideoStatusMessage("Status: Failed");
+              }
               // Clear the interval on failure
               if (completionCheckIntervalRef.current) {
                 clearInterval(completionCheckIntervalRef.current);
                 completionCheckIntervalRef.current = null;
               }
+              activeCompletionJobIdRef.current = null;
+              lastCompletionStatusRef.current = "";
             } else {
-              console.log("[GolpoAI] Video still processing, status:", status);
-              setVideoStatusMessage("Status: Processing - Video generation in progress...");
+              const next = (status || "processing").toLowerCase();
+              if (lastCompletionStatusRef.current !== next) {
+                lastCompletionStatusRef.current = next;
+              }
+              if (lastStatusTextRef.current !== "Status: Processing") {
+                lastStatusTextRef.current = "Status: Processing";
+                setVideoStatusMessage("Status: Processing");
+              }
             }
           } catch (checkError) {
-            console.error("[GolpoAI] Error checking for video completion:", checkError);
+            // swallow; next tick will retry
+          } finally {
+            completionInFlightRef.current = false;
           }
         };
         
-        // Run immediate check first, then set up interval
+        // Run immediate check first, then set up interval (single interval only)
         checkForCompletion();
-        completionCheckIntervalRef.current = setInterval(checkForCompletion, 15000); // Check every 15 seconds for faster detection
+        if (!completionCheckIntervalRef.current) {
+          completionCheckIntervalRef.current = setInterval(checkForCompletion, COMPLETION_CHECK_INTERVAL);
+        }
       } else {
         console.warn("[GolpoAI] handleGenerateVideo: No job id or video URL returned, showing raw response");
         handleVideoReady(responseBody);
@@ -4254,9 +4283,9 @@ function App() {
         {/* Header */}
         <header style={currentStyles.heroContainer}>
           <section style={currentStyles.heroCard}>
-            <div style={currentStyles.heroContent}>
-              <img src={golpoIcon} style={currentStyles.logo} alt="Golpo AI" />
-              <h1 style={currentStyles.heroTitle}>{APP_TITLE}</h1>
+              <div style={currentStyles.heroContent}>
+                <img src={golpoIcon} style={currentStyles.logo} alt="Golpo AI" />
+                <h1 style={currentStyles.heroTitle}>{APP_TITLE}</h1>
             </div>
           </section>
         </header>
@@ -4270,42 +4299,42 @@ function App() {
                 style={currentStyles.latestVideoLinkButton}
                 onClick={async () => {
                   console.log("[GolpoAI] ========== Open video clicked (latest video) ==========");
-                  console.log("[GolpoAI] Video URL:", latestVideoUrl);
-
-                  if (!requireContentActionForMedia("play the video")) {
-                    console.log("[GolpoAI] Content action required check failed");
-                    return;
-                  }
-
-                  setIsLoadingVideo(true);
-                  setError("");
-
-                  try {
-                    console.log("[GolpoAI] Preparing video for modal playback");
-                    const normalizedInfo = {
-                      jobId: null, // We don't have job ID from URL
-                      videoUrl: latestVideoUrl,
-                      downloadUrl: latestVideoUrl,
-                      status: "completed",
+                console.log("[GolpoAI] Video URL:", latestVideoUrl);
+                
+                if (!requireContentActionForMedia("play the video")) {
+                  console.log("[GolpoAI] Content action required check failed");
+                  return;
+                }
+                
+                setIsLoadingVideo(true);
+                setError("");
+                
+                try {
+                console.log("[GolpoAI] Preparing video for modal playback");
+                  const normalizedInfo = {
+                    jobId: null, // We don't have job ID from URL
+                    videoUrl: latestVideoUrl,
+                    downloadUrl: latestVideoUrl,
+                    status: "completed",
                       raw: { video_url: latestVideoUrl },
-                    };
+                  };
 
-                    setVideoReadyInfo(normalizedInfo);
-                    setIsVideoTooLarge(false);
-                    setVideoPlayerUrl(null);
-                    setShowVideoPlayerModal(true);
-
+                  setVideoReadyInfo(normalizedInfo);
+                  setIsVideoTooLarge(false);
+                  setVideoPlayerUrl(null);
+                  setShowVideoPlayerModal(true);
+                  
                     // Prepare video source - converts to blob and plays inside modal
-                    await prepareVideoSource(latestVideoUrl);
-                    console.log("[GolpoAI] ✅ Video source prepared successfully for modal playback");
-                  } catch (error) {
+                  await prepareVideoSource(latestVideoUrl);
+                  console.log("[GolpoAI] ✅ Video source prepared successfully for modal playback");
+                } catch (error) {
                     console.error("[GolpoAI] ❌ ERROR opening latest video in modal:", error);
-                    setIsLoadingVideo(false);
-                    setIsVideoTooLarge(true);
-                    setError(`Failed to load video: ${error.message}`);
-                  }
-                }}
-              >
+                  setIsLoadingVideo(false);
+                  setIsVideoTooLarge(true);
+                  setError(`Failed to load video: ${error.message}`);
+                }
+              }}
+            >
                 {isLoadingVideo ? "Opening..." : "Open Video"}
               </button>
             </div>
@@ -4374,24 +4403,24 @@ function App() {
                 {latestVideoUrl ? (
                   <SparklesIcon size={20} />
                 ) : (
-                  <span style={currentStyles.generateButtonIcon} aria-hidden>
-                    <svg
-                      width="24"
-                      height="24"
-                      viewBox="0 0 36 36"
-                      fill="none"
-                      xmlns="http://www.w3.org/2000/svg"
-                    >
-                      <rect x="4" y="9" width="20" height="18" rx="6" stroke={description.length > 0 ? "#FF4D6D" : "#fff"} strokeWidth="3" fill="none" />
-                      <path
-                        d="M24 16.5L31 12V24L24 19.5"
-                        stroke={description.length > 0 ? "#FF4D6D" : "#fff"}
-                        strokeWidth="3"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  </span>
+                <span style={currentStyles.generateButtonIcon} aria-hidden>
+                  <svg
+                    width="24"
+                    height="24"
+                    viewBox="0 0 36 36"
+                    fill="none"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <rect x="4" y="9" width="20" height="18" rx="6" stroke={description.length > 0 ? "#FF4D6D" : "#fff"} strokeWidth="3" fill="none" />
+                    <path
+                      d="M24 16.5L31 12V24L24 19.5"
+                      stroke={description.length > 0 ? "#FF4D6D" : "#fff"}
+                      strokeWidth="3"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </span>
                 )}
                 <span>{latestVideoUrl ? "Regenerate" : "Generate Video"}</span>
               </button>
@@ -4634,61 +4663,61 @@ function App() {
 
             {/* Second stage: job created & processing (no spinner, allow close after completion) */}
             {videoJobId && videoStatusMessage === "Complete" && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  
-                  // Prevent multiple rapid clicks - check FIRST before any state changes
-                  if (isClosingModalRef.current) {
-                    console.log("[GolpoAI] Close already in progress, ignoring click");
-                    return;
-                  }
-                  
-                  // Set flag IMMEDIATELY to prevent any subsequent clicks
-                  isClosingModalRef.current = true;
-                  
-                  console.log("[GolpoAI] Closing video generation modal, job ID:", videoJobId);
-                  
-                  // Set flags FIRST to prevent modal from reopening
-                  modalDismissedRef.current = true; // Session-level flag
-                  localStorage.setItem('golpo_video_modal_dismissed', 'true'); // Persist for app revisit
-                  
-                  // DON'T clear the interval - let polling continue in background
-                  // Polling will continue but won't reopen the modal
-                  
-                  // Update states to close modal immediately - set both flags that control modal visibility
-                  setIsGeneratingVideo(false);
-                  setIsPollingVideoStatus(false);
-                  setVideoStatusMessage("");
-                  setVideoGenerationResult(null);
-                  
-                  console.log("[GolpoAI] Modal closed - polling continues in background");
-                  
-                  // Reset closing flag after a delay to allow state updates to complete
-                  setTimeout(() => {
-                    isClosingModalRef.current = false;
-                  }, 500);
-                }}
-                style={{
-                  ...styles.loadingCloseButton,
-                  zIndex: 1001,
-                }}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                
+                // Prevent multiple rapid clicks - check FIRST before any state changes
+                if (isClosingModalRef.current) {
+                  console.log("[GolpoAI] Close already in progress, ignoring click");
+                  return;
+                }
+                
+                // Set flag IMMEDIATELY to prevent any subsequent clicks
+                isClosingModalRef.current = true;
+                
+                console.log("[GolpoAI] Closing video generation modal, job ID:", videoJobId);
+                
+                // Set flags FIRST to prevent modal from reopening
+                modalDismissedRef.current = true; // Session-level flag
+                localStorage.setItem('golpo_video_modal_dismissed', 'true'); // Persist for app revisit
+                
+                // DON'T clear the interval - let polling continue in background
+                // Polling will continue but won't reopen the modal
+                
+                // Update states to close modal immediately - set both flags that control modal visibility
+                setIsGeneratingVideo(false);
+                setIsPollingVideoStatus(false);
+                setVideoStatusMessage("");
+                setVideoGenerationResult(null);
+                
+                console.log("[GolpoAI] Modal closed - polling continues in background");
+                
+                // Reset closing flag after a delay to allow state updates to complete
+                setTimeout(() => {
+                  isClosingModalRef.current = false;
+                }, 500);
+              }}
+              style={{
+                ...styles.loadingCloseButton,
+                zIndex: 1001,
+              }}
                 title="Close"
-                onMouseEnter={(e) => {
+              onMouseEnter={(e) => {
                   e.target.style.color = "#1e293b";
                   e.target.style.background = "#e2e8f0";
                   e.target.style.borderColor = "#cbd5e1";
-                }}
-                onMouseLeave={(e) => {
+              }}
+              onMouseLeave={(e) => {
                   e.target.style.color = "#475569";
                   e.target.style.background = "#f8fafc";
                   e.target.style.borderColor = "#e2e8f0";
-                }}
-              >
-                ×
-              </button>
+              }}
+            >
+              ×
+            </button>
             )}
             
             <h3 style={styles.loadingTitle}>Generating your Golpo video</h3>
@@ -4735,8 +4764,8 @@ function App() {
             >
               ×
             </button>
-            <div style={styles.modalHeader}>
-              <div style={styles.modalIconWrapper}>
+            <div style={{ ...styles.modalHeader, gap: 10, marginBottom: 12 }}>
+              <div style={{ ...styles.modalIconWrapper, width: 32, height: 32, borderRadius: 8 }}>
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
                   <rect x="2" y="4" width="14" height="12" rx="3" stroke="#FF4D6D" strokeWidth="2" />
                   <path
@@ -4748,7 +4777,7 @@ function App() {
                   />
                 </svg>
               </div>
-              <h2 style={styles.modalTitle}>Your video is ready!</h2>
+              <h2 style={{ ...styles.modalTitle, fontSize: 16, marginBottom: 0 }}>Your video is ready!</h2>
             </div>
             <div style={styles.modalBody}>
               <p style={{ marginBottom: 8, color: "#475569", lineHeight: 1.45, fontSize: 13 }}>
@@ -4757,9 +4786,9 @@ function App() {
               <p style={{ marginBottom: 14, color: "#475569", lineHeight: 1.45, fontSize: 13 }}>
                 You can scroll to the latest comment to view the video link, or use the buttons below.
               </p>
-              <div style={styles.modalActions}>
+              <div style={{ ...styles.modalActions, marginTop: 12 }}>
                 <button
-                  style={styles.modalPrimaryButton}
+                  style={{ ...styles.modalPrimaryButton, padding: "9px 16px", borderRadius: 12, fontSize: 13 }}
                   onClick={async () => {
                     // Use completedVideoUrl or latestVideoUrl directly - same as automatic preview
                     const videoUrlToPlay = completedVideoUrl || latestVideoUrl || allVideoUrls[allVideoUrls.length - 1];
@@ -4839,7 +4868,7 @@ function App() {
                   Open video
                 </button>
                 <button
-                  style={styles.modalSecondaryButton}
+                  style={{ ...styles.modalSecondaryButton, padding: "9px 16px", borderRadius: 12, fontSize: 13 }}
                   onClick={() => {
                     setShowVideoCompletionModal(false);
                     setCompletedVideoUrl(null);
@@ -4909,23 +4938,23 @@ function App() {
                   Close
                 </button>
               </div>
+                </div>
+                </div>
             </div>
-          </div>
-        </div>
       )}
 
       {showLowCreditsModal && (
         <div style={styles.videoReadyOverlay}>
           <div style={styles.videoReadyCard}>
-            <button
-              onClick={() => {
+              <button
+                onClick={() => {
                 setShowLowCreditsModal(false);
-              }}
+                }}
               style={styles.modalCloseButton}
               title="Close"
-            >
+              >
               ×
-            </button>
+              </button>
             <div style={styles.modalHeader}>
               <div style={styles.modalIconWrapper}>
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
@@ -4946,12 +4975,12 @@ function App() {
                 You have low credits. Video can&apos;t be generated.
               </p>
               <div style={styles.modalActions}>
-                <button
+              <button
                   style={styles.modalSecondaryButton}
                   onClick={() => setShowLowCreditsModal(false)}
                 >
                   Close
-                </button>
+              </button>
               </div>
             </div>
           </div>
@@ -5126,7 +5155,7 @@ function App() {
             <div style={styles.videoModalBody}>
               {isVideoTooLarge ? (
                 <>
-                  <p style={styles.videoModalMessage}>
+                <p style={styles.videoModalMessage}>
                     This video is ready, but it’s too large to play inside this window.
                   </p>
                   {videoReadyInfo?.videoUrl && (
@@ -5961,11 +5990,11 @@ const styles = {
   // Smaller card used only for the "Your video is ready!" completion popup
   videoCompletionCard: {
     background: "#fff",
-    borderRadius: 18,
-    padding: "16px 18px",
-    maxWidth: 520,
+    borderRadius: 16,
+    padding: "12px 14px",
+    maxWidth: 440,
     width: "90%",
-    maxHeight: "75vh",
+    maxHeight: "65vh",
     overflowY: "auto",
     boxShadow: "0 22px 45px rgba(15, 23, 42, 0.22)",
     position: "relative",
