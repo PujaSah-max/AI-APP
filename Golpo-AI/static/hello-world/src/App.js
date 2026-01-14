@@ -57,7 +57,9 @@ const languageOptions = [
   "Punjabi",
   "Urdu",
 ];
-const VIDEO_STATUS_POLL_INTERVAL = 5000; // ms
+// Polling too frequently causes excessive re-renders in the Confluence iframe.
+// Keep this comfortably slow; backend polling continues separately.
+const VIDEO_STATUS_POLL_INTERVAL = 12000; // ms
 
 // Helper to strip HTML/markup for summaries
 const stripMarkup = (html) => {
@@ -729,6 +731,9 @@ function App() {
   const videoObjectUrlRef = useRef(null);
   const videoElementRef = useRef(null);
   const fullscreenVideoRef = useRef(null);
+  // Prevent overlapping polls + reduce re-renders from setting identical status text
+  const pollInFlightRef = useRef(false);
+  const lastStatusTextRef = useRef("");
   const [showVideoFailureModal, setShowVideoFailureModal] = useState(false);
   const [videoFailureMessage, setVideoFailureMessage] = useState("");
   const [isFullscreenVideo, setIsFullscreenVideo] = useState(false);
@@ -1584,40 +1589,41 @@ function App() {
     }
   }, [videoPlayerUrl, videoReadyInfo?.videoUrl, prepareVideoSource]);
 
-  // CRITICAL: Continuous monitor - check video element src every 100ms and clear S3 URLs
+  // Continuous monitor - check video element src periodically and clear S3 URLs.
+  // IMPORTANT: do NOT run this too frequently, otherwise the iframe becomes sluggish.
   useEffect(() => {
-    if (!videoElementRef.current) return;
-    
+    if (!showVideoPlayerModal) return;
     const video = videoElementRef.current;
+    if (!video) return;
+
     const checkInterval = setInterval(() => {
-      if (!video) return;
-      const currentSrc = video.src || video.getAttribute('src') || '';
-      
+      const currentSrc = video.src || video.getAttribute("src") || "";
+
       // If video element has S3 URL, clear it immediately
-      if (currentSrc && (currentSrc.includes('s3.amazonaws.com') || currentSrc.includes('s3.us-east-2.amazonaws.com'))) {
-        console.error("[GolpoAI] CONTINUOUS MONITOR: Video element has S3 URL! Clearing immediately:", currentSrc);
+      if (currentSrc && (currentSrc.includes("s3.amazonaws.com") || currentSrc.includes("s3.us-east-2.amazonaws.com"))) {
+        console.error("[GolpoAI] MONITOR: Video element has S3 URL! Clearing immediately:", currentSrc);
         try {
-          video.src = '';
-          video.setAttribute('src', '');
-          video.removeAttribute('src');
+          video.src = "";
+          video.setAttribute("src", "");
+          video.removeAttribute("src");
           video.load();
-      setVideoPlayerUrl(null);
-          
+          setVideoPlayerUrl(null);
+
           // Retry with prepareVideoSource if we have a video URL
-          if (videoReadyInfo?.videoUrl && !videoReadyInfo.videoUrl.includes('s3.')) {
+          if (videoReadyInfo?.videoUrl && !videoReadyInfo.videoUrl.includes("s3.")) {
             // Only retry if it's not already an S3 URL (to avoid infinite loop)
-            prepareVideoSource(videoReadyInfo.videoUrl).catch(err => {
-              console.error("[GolpoAI] Continuous monitor retry failed:", err);
+            prepareVideoSource(videoReadyInfo.videoUrl).catch((err) => {
+              console.error("[GolpoAI] Monitor retry failed:", err);
             });
           }
         } catch (e) {
-          console.error("[GolpoAI] Error clearing S3 URL in continuous monitor:", e);
+          console.error("[GolpoAI] Error clearing S3 URL in monitor:", e);
         }
       }
-    }, 100); // Check every 100ms
-    
+    }, 1000); // Check every 1s (was 100ms)
+
     return () => clearInterval(checkInterval);
-  }, [videoElementRef.current, videoReadyInfo?.videoUrl, prepareVideoSource]);
+  }, [showVideoPlayerModal, videoReadyInfo?.videoUrl, prepareVideoSource]);
 
   // CRITICAL: Monitor video element ref and block S3 URLs from being set
   // Also intercept src setter to prevent S3 URLs
@@ -2401,6 +2407,12 @@ function App() {
         return;
       }
 
+      // Avoid overlapping polls if the previous request is still in-flight.
+      if (pollInFlightRef.current) {
+        return;
+      }
+
+      pollInFlightRef.current = true;
       try {
         const response = await safeInvoke("getVideoStatus", { jobId });
         const statusPayload = response?.body || response;
@@ -2411,21 +2423,11 @@ function App() {
           statusPayload?.state ||
           "";
 
-        console.log("[GolpoAI] pollVideoStatus response:", statusPayload);
-        console.log("[GolpoAI] pollVideoStatus extracted status:", status);
-        console.log("[GolpoAI] pollVideoStatus isFailureStatus check:", isFailureStatus(status));
-        console.log("[GolpoAI] pollVideoStatus isTimeout check:", status && normalizeStatus(status).includes("timeout"));
-
-        // Update status message - show "Status: Processing" for all in-progress states
-        if (status) {
-          const statusLower = status.toLowerCase();
-          if (isSuccessStatus(status)) {
-            setVideoStatusMessage("Status: Complete");
-          } else {
-            setVideoStatusMessage("Status: Processing");
-          }
-        } else {
-          setVideoStatusMessage("Status: Processing");
+        // Update status message, but avoid re-rendering if text hasn't changed
+        const nextStatusText = isSuccessStatus(status) ? "Status: Complete" : "Status: Processing";
+        if (lastStatusTextRef.current !== nextStatusText) {
+          lastStatusTextRef.current = nextStatusText;
+          setVideoStatusMessage(nextStatusText);
         }
 
         const videoUrlCandidate = extractVideoUrlFromPayload(statusPayload);
@@ -2465,6 +2467,8 @@ function App() {
         videoStatusTimerRef.current = setTimeout(() => {
           pollVideoStatus(jobId, attempt + 1);
         }, VIDEO_STATUS_POLL_INTERVAL);
+      } finally {
+        pollInFlightRef.current = false;
       }
     },
     [clearVideoStatusTimer, handleVideoReady, safeInvoke, isOnCorrectPage, normalizeStatus, setShowVideoFailureModal, setVideoFailureMessage]
@@ -2479,6 +2483,8 @@ function App() {
       clearVideoStatusTimer();
       setVideoJobId(jobId);
       setIsPollingVideoStatus(true);
+      // Prime status text without forcing repeated updates during polling
+      lastStatusTextRef.current = "Status: Processing";
       setVideoStatusMessage("Status: Processing");
       pollVideoStatus(jobId, 0);
     },
