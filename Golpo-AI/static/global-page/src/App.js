@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@forge/bridge';
+import { providerConfig } from './providerConfig';
 import './App.css';
 
 /**
@@ -42,8 +43,8 @@ function App() {
     },
     {
       id: 2,
-      title: 'Access Golpo AI from page menu',
-      description: 'Open the three dots menu and find Golpo AI under Apps',
+      title: `Access ${providerConfig.displayName} from page menu`,
+      description: `Open the three dots menu and find ${providerConfig.displayName} under Apps`,
       image: './step 2.png',
       details: [
         'Open any Confluence page you want to work with',
@@ -51,18 +52,18 @@ function App() {
         'Click the three dots to open the dropdown menu',
         'Hover over or click "Apps" in the menu (it has a four-square icon with a plus sign)',
         'A submenu will appear on the left showing available apps',
-        'Select "Golpo AI " from the Apps submenu to launch the app'
+        `Select "${providerConfig.displayName} " from the Apps submenu to launch the app`
       ],
       arrows: []
     },
     {
       id: 3,
-      title: 'Using Golpo AI to generate videos',
+      title: `Using ${providerConfig.displayName} to generate videos`,
       description: 'Create videos from your Confluence pages using action cards and context',
       image: './step 3_1.png',
       image2: './step 3_2.png',
       details: [
-        'When Golpo AI opens, the most recently generated video appears at the top of the panel',
+        `When ${providerConfig.displayName} opens, the most recently generated video appears at the top of the panel`,
         'The interface has action cards that you can interact with',
         'Click on an action card to add it to the description box',
         'The context section automatically adds information from the current Confluence page',
@@ -331,13 +332,13 @@ function App() {
           <div className="brandIconWrap">
             <img
               className="brandIcon"
-              src="./GOLPO_ICON_1.png"
-              alt="Golpo AI logo"
+              src={providerConfig.logo}
+              alt={`${providerConfig.displayName} logo`}
             />
           </div>
 
           <div className="brandText">
-            <div className="brandName">Golpo AI</div>
+            <div className="brandName">{providerConfig.displayName}</div>
 
           </div>
         </div>
@@ -373,16 +374,16 @@ function App() {
 
       <main className="hero">
         <h1 className="heroTitle">
-          Transform Confluence pages into engaging whiteboard videos
+          {providerConfig.description}
         </h1>
 
         <p className="heroSubtitle">
-          Golpo AI converts your Confluence pages into AI-generated whiteboard videos, helping teams explain ideas faster and share knowledge more effectively
+          {providerConfig.tagline}
         </p>
       </main>
 
       <section className="navGuide">
-        <h2 className="navGuideTitle">Create your first video with Golpo AI</h2>
+        <h2 className="navGuideTitle">Create your first video with {providerConfig.displayName}</h2>
         <p className="navGuideIntro">Follow these simple steps to generate a video from any Confluence page:</p>
 
         <div className="navSteps">
@@ -444,7 +445,7 @@ function App() {
                           {arrow.showLogo && (
                             <img
                               src="./logo.png"
-                              alt="Golpo AI logo"
+                              alt={`${providerConfig.displayName} logo`}
                               className="arrowLogo"
                               onError={(e) => e.target.style.display = 'none'}
                             />
@@ -473,7 +474,7 @@ function App() {
       <footer className="pageFooter">
         <p className="footerText">
           <span className="footerPoweredBy">Powered by </span>
-          <span className="footerBrand">Golpo AI</span>
+          <span className="footerBrand">{providerConfig.displayName}</span>
         </p>
       </footer>
     </div>
@@ -484,9 +485,9 @@ function App() {
         <div className="modalContent settingsModalContent" onClick={(e) => e.stopPropagation()}>
           <div className="modalHeader">
             <div>
-              <h3 className="modalTitle">Configure Golpo AI API Key</h3>
+              <h3 className="modalTitle">Configure {providerConfig.displayName} API Key</h3>
               <p className="modalDescription">
-                Enter your Golpo AI API key to generate videos.
+                Enter your {providerConfig.displayName} API key to generate videos.
                 <br />
                 Your API key is stored securely and is only accessible by you.
               </p>

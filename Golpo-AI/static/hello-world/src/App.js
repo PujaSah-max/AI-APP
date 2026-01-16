@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke, view, getContext, requestConfluence } from "@forge/bridge";
+import { providerConfig } from "./providerConfig";
 import golpoIcon from "./static/GOLPO_ICON_1.png";
 import SparklesIcon from "./components/SparklesIcon";
 
-const APP_TITLE = "Golpo AI";
-const APP_TAGLINE = "Generate engaging videos from your Confluence page";
+const APP_TITLE = providerConfig.displayName;
+const APP_TAGLINE = providerConfig.description;
 
 // TEMP (testing): override credits returned from backend.
 // Set to a number (e.g. 0) to force the low-credits popup; keep null to use real credits.
@@ -190,7 +191,7 @@ const extractCommentAuthor = (comment) => {
   return "Unknown";
 };
 
-// Helper to create a document for Golpo AI API
+// Helper to create a document for video provider API
 const createGolpoAIDocument = (pageBody, footerComments) => {
   const pageTitle = pageBody?.title || "Untitled Page";
   const pageContent = extractPageBodyContent(pageBody);
@@ -2145,21 +2146,26 @@ function App() {
   }, [safeInvoke]);
 
   // Extract all video URLs from comments only
-  const extractAllVideoUrls = useCallback((pageData, comments) => {
-    const videoUrls = new Set(); // Use Set to avoid duplicates
-
-    // Extract from comments only
+  // Helper function to extract video URLs from comments, preserving order
+  // Returns URLs in the order they appear in comments (last comment = newest video)
+  const extractVideoUrlsWithTimestamps = useCallback((comments) => {
+    const videoUrls = [];
+    
     if (comments && Array.isArray(comments)) {
+      // Iterate through comments in order (last comment is the newest one added)
       comments.forEach((comment) => {
         const commentText = extractCommentBodyContent(comment);
+        const urlsFromComment = [];
+        
         // Look for video URLs in comment text
         const urlRegex = /(https?:\/\/[^\s<>"{}|\\^`\[\]]+\.mp4[^\s<>"{}|\\^`\[\]]*)/gi;
         let urlMatch;
         while ((urlMatch = urlRegex.exec(commentText)) !== null) {
           if (urlMatch[1]) {
-            videoUrls.add(urlMatch[1]);
+            urlsFromComment.push(urlMatch[1]);
           }
         }
+        
         // Also check comment body HTML
         if (comment.body?.storage?.value) {
           const commentHtml = comment.body.storage.value;
@@ -2167,15 +2173,28 @@ function App() {
           for (const match of hrefMatches) {
             const url = match[1] || match[2];
             if (url && url.includes('http') && (url.includes('.mp4') || url.includes('golpo') || url.includes('video'))) {
-              videoUrls.add(url);
+              urlsFromComment.push(url);
             }
           }
         }
+        
+        // Add URLs from this comment to the array (preserving order)
+        urlsFromComment.forEach(url => {
+          if (url && url.trim().length > 0 && !videoUrls.includes(url)) {
+            videoUrls.push(url);
+          }
+        });
       });
     }
+    
+    // Return URLs in order (last one is from the newest comment)
+    return videoUrls;
+  }, []);
 
-    return Array.from(videoUrls).filter(url => url && url.trim().length > 0);
-  }, []); // extractCommentBodyContent is defined outside, so no dependency needed
+  const extractAllVideoUrls = useCallback((pageData, comments) => {
+    // Use the new timestamp-based extraction for accurate sorting
+    return extractVideoUrlsWithTimestamps(comments);
+  }, [extractVideoUrlsWithTimestamps]);
 
   // Helper function to check if we're on the correct page before showing completion popup
   const isOnCorrectPage = useCallback(async () => {
@@ -2365,16 +2384,16 @@ function App() {
                 const latestComments = footerResponse?.body?.results || [];
                 
                 if (latestComments && latestComments.length > 0) {
-                  // Extract video URLs from the latest comments (newest first)
-                  const allUrls = extractAllVideoUrls(null, latestComments);
+                  // Extract video URLs from comments (preserving order - last comment = newest)
+                  const sortedUrls = extractVideoUrlsWithTimestamps(latestComments);
                   
-                  if (allUrls.length > 0) {
-                    // Set the latest video URL from the newest comment (last one is newest)
-                    const latestUrl = allUrls[allUrls.length - 1];
+                  if (sortedUrls.length > 0) {
+                    // Set the latest video URL from the last comment (newest one added)
+                    const latestUrl = sortedUrls[sortedUrls.length - 1];
                     setLatestVideoUrl(latestUrl);
-                    setAllVideoUrls(allUrls);
-                    setCurrentVideoIndex(allUrls.length - 1);
-                    console.log("[GolpoAI] handleVideoReady: Latest video URL updated from newest comment:", latestUrl);
+                    setAllVideoUrls(sortedUrls);
+                    setCurrentVideoIndex(sortedUrls.length - 1);
+                    console.log("[GolpoAI] handleVideoReady: Latest video URL updated from newest comment (last in array):", latestUrl);
                   } else {
                     // Fallback: use the generated video URL directly
                     setLatestVideoUrl(videoUrl);
@@ -3127,15 +3146,15 @@ function App() {
               console.log("[GolpoAI] Full page details fetched on load", fullPageInfo.id);
               setDocumentPayload(fullPageInfo);
               
-              // Extract all video URLs from comments immediately
-              const allUrls = extractAllVideoUrls(null, fetchedFooterComments);
+              // Extract all video URLs from comments (preserving order - last comment = newest)
+              const allUrls = extractVideoUrlsWithTimestamps(fetchedFooterComments);
               setAllVideoUrls(allUrls);
               if (allUrls.length > 0) {
-                // Set latest video URL from comments (last one is newest since comments are added at the end)
+                // Set latest video URL from the last comment (newest one added)
                 const latestUrl = allUrls[allUrls.length - 1];
                 setLatestVideoUrl(latestUrl);
                 setCurrentVideoIndex(allUrls.length - 1);
-                console.log("[GolpoAI] Latest video URL set from newest comment:", latestUrl);
+                console.log("[GolpoAI] Latest video URL set from newest comment (last in array):", latestUrl);
                 
                 // Check if user had a video generation in progress (stored in localStorage)
                 const storedJobId = localStorage.getItem('golpo_video_job_id');
@@ -3327,14 +3346,14 @@ function App() {
               setDocumentPayload(pageInfo);
               
               // Still extract video URLs from comments even if page body fetch failed
-              const allUrls = extractAllVideoUrls(null, fetchedFooterComments);
+              const allUrls = extractVideoUrlsWithTimestamps(fetchedFooterComments);
               setAllVideoUrls(allUrls);
               if (allUrls.length > 0) {
-                // Set latest video URL from comments (last one is newest since comments are added at the end)
+                // Set latest video URL from the last comment (newest one added)
                 const latestUrl = allUrls[allUrls.length - 1];
                 setLatestVideoUrl(latestUrl);
                 setCurrentVideoIndex(allUrls.length - 1);
-                console.log("[GolpoAI] Latest video URL set from newest comment (fallback):", latestUrl);
+                console.log("[GolpoAI] Latest video URL set from newest comment (fallback, last in array):", latestUrl);
               }
               
               const mapped = toUiPage(pageInfo);
@@ -3633,15 +3652,15 @@ function App() {
 
       // Update document payload and pages with full document
       setDocumentPayload(pageBody);
-      // Extract all video URLs from comments only
-      const allUrls = extractAllVideoUrls(null, footerResult);
+      // Extract all video URLs from comments (preserving order - last comment = newest)
+      const allUrls = extractVideoUrlsWithTimestamps(footerResult);
       setAllVideoUrls(allUrls);
       if (allUrls.length > 0) {
-        // Set latest video URL from comments (last one is newest since comments are added at the end)
+        // Set latest video URL from the last comment (newest one added)
         const latestUrl = allUrls[allUrls.length - 1];
         setLatestVideoUrl(latestUrl);
         setCurrentVideoIndex(allUrls.length - 1);
-        console.log("[GolpoAI] Latest video URL set from newest comment:", latestUrl);
+        console.log("[GolpoAI] Latest video URL set from newest comment (last in array):", latestUrl);
       }
       const mapped = toUiPage(pageBody);
       if (mapped) {
@@ -5075,7 +5094,7 @@ function App() {
                      // Extract all video URLs from page body and comments
                      const footerResponse = await safeInvoke("getFooterComments", { pageId: targetId });
                      const footerResult = footerResponse?.body?.results || [];
-                     const allUrls = extractAllVideoUrls(pageBody, footerResult);
+                     const allUrls = extractVideoUrlsWithTimestamps(footerResult);
                      
                      if (allUrls.length === 0) {
                        setError("No videos found on this page.");
@@ -5084,7 +5103,7 @@ function App() {
                     }
                      
                      setAllVideoUrls(allUrls);
-                     // Use last video (newest since comments are added at the end)
+                     // Use last video (newest comment - last in array)
                      const recentVideoUrl = allUrls[allUrls.length - 1];
                      setCurrentVideoIndex(allUrls.length - 1);
                     

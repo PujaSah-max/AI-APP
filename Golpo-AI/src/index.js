@@ -3,10 +3,187 @@ import api, { route, storage } from '@forge/api';
 
 const resolver = new Resolver();
 
-// Base URL for Golpo AI API - default to staging, overridable via Forge variable
-const GOLPO_API_BASE_URL = (process.env.GOLPO_API_BASE_URL || 'https://staging-api.golpoai.com').replace(/\/$/, '');
+// ============================================================================
+// VIDEO PROVIDER CONFIGURATION
+// ============================================================================
+// Static configuration for the active video generation provider
+// To switch providers, update this config object
+const videoProviderConfig = {
+  name: 'Golpo AI',
+  baseUrl: (process.env.GOLPO_API_BASE_URL || 'https://staging-api.golpoai.com').replace(/\/$/, ''),
+  endpoints: {
+    generate: '/api/v1/videos/generate',
+    status: '/api/v1/videos/status',
+    credits: '/api/v1/users/credits',
+    cancel: '/api/v1/videos/cancel'
+  },
+  auth: {
+    type: 'api-key', // 'api-key', 'bearer', 'oauth', etc.
+    headerName: 'x-api-key' // Header name for API key
+  },
+  responseMapping: {
+    // Map provider-specific response fields to standard format
+    jobId: (data) => data?.job_id || data?.jobId || data?.id || data?.data?.job_id || data?.data?.jobId,
+    videoUrl: (data) => data?.video_url || data?.videoUrl || data?.url || data?.data?.video_url || data?.data?.videoUrl,
+    status: (data) => data?.status || data?.state || data?.body?.status || '',
+    credits: (data) => data?.current_credits !== undefined && data?.current_credits !== null
+      ? data.current_credits
+      : (data?.credits !== undefined && data?.credits !== null ? data.credits : 0)
+  },
+  errorMapping: {
+    // Map provider-specific error fields
+    message: (error) => error?.detail || error?.message || error?.error || 'Unknown error',
+    code: (error) => error?.code || error?.status_code || null
+  }
+};
 
-// Base URL for Google Gemini AI API
+// ============================================================================
+// VIDEO SERVICE LAYER
+// ============================================================================
+// Thin service functions that abstract provider-specific API calls
+// All provider-specific logic is contained here
+
+/**
+ * Fetch credits from the video provider
+ * @param {string} apiKey - Provider API key
+ * @returns {Promise<number>} Current credits balance
+ */
+const fetchCredits = async (apiKey) => {
+  const url = `${videoProviderConfig.baseUrl}${videoProviderConfig.endpoints.credits}`;
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      [videoProviderConfig.auth.headerName]: apiKey,
+    },
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to fetch credits: ${response.status} ${errorText}`);
+  }
+  
+  const data = await response.json();
+  return videoProviderConfig.responseMapping.credits(data);
+};
+
+/**
+ * Generate video using the provider
+ * @param {string} apiKey - Provider API key
+ * @param {Object} requestBody - Video generation request body (provider-specific format)
+ * @returns {Promise<Object>} Provider response with jobId and videoUrl
+ */
+const generateVideoService = async (apiKey, requestBody) => {
+  const url = `${videoProviderConfig.baseUrl}${videoProviderConfig.endpoints.generate}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      [videoProviderConfig.auth.headerName]: apiKey,
+    },
+    body: JSON.stringify(requestBody)
+  });
+  
+  if (!response.ok) {
+    let errorBody = 'Unable to read error body';
+    try {
+      errorBody = await response.text();
+    } catch (e) {
+      console.warn('[videoService:generateVideo] Failed to read error body:', e);
+    }
+    
+    let errorMessage = `${videoProviderConfig.name} API error: ${response.status} ${response.statusText}`;
+    
+    try {
+      const errorJson = JSON.parse(errorBody);
+      const mappedMessage = videoProviderConfig.errorMapping.message(errorJson);
+      errorMessage += `. ${mappedMessage}`;
+    } catch (parseError) {
+      errorMessage += `. ${errorBody.substring(0, 500)}`;
+    }
+    
+    throw new Error(errorMessage);
+  }
+  
+  const data = await response.json();
+  
+  // Map response to standard format
+  return {
+    jobId: videoProviderConfig.responseMapping.jobId(data),
+    videoUrl: videoProviderConfig.responseMapping.videoUrl(data),
+    rawResponse: data
+  };
+};
+
+/**
+ * Get video status from the provider
+ * @param {string} apiKey - Provider API key
+ * @param {string} jobId - Video job ID
+ * @returns {Promise<Object>} Status response with status and videoUrl
+ */
+const getVideoStatusService = async (apiKey, jobId) => {
+  const url = `${videoProviderConfig.baseUrl}${videoProviderConfig.endpoints.status}/${jobId}`;
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      [videoProviderConfig.auth.headerName]: apiKey,
+    }
+  });
+  
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`${videoProviderConfig.name} status error: ${response.status} ${response.statusText}. ${errorBody}`);
+  }
+  
+  const data = await response.json();
+  
+  // Map response to standard format
+  return {
+    status: videoProviderConfig.responseMapping.status(data),
+    videoUrl: videoProviderConfig.responseMapping.videoUrl(data),
+    rawResponse: data
+  };
+};
+
+/**
+ * Cancel a video generation job
+ * @param {string} apiKey - Provider API key
+ * @param {string} jobId - Video job ID
+ * @returns {Promise<boolean>} Success status
+ */
+const cancelVideo = async (apiKey, jobId) => {
+  // Try multiple possible cancel endpoints
+  const cancelUrls = [
+    `${videoProviderConfig.baseUrl}${videoProviderConfig.endpoints.cancel}/${jobId}`,
+    `${videoProviderConfig.baseUrl}${videoProviderConfig.endpoints.cancel}`,
+    `${videoProviderConfig.baseUrl}/api/v1/videos/${jobId}/cancel`
+  ];
+  
+  for (const cancelUrl of cancelUrls) {
+    try {
+      const response = await fetch(cancelUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          [videoProviderConfig.auth.headerName]: apiKey,
+        },
+        body: JSON.stringify({ job_id: jobId, jobId: jobId })
+      });
+      
+      if (response.ok) {
+        return true;
+      }
+    } catch (error) {
+      // Try next URL
+      continue;
+    }
+  }
+  
+  return false;
+};
+
+// Base URL for Google Gemini AI API (used for script generation, if needed)
 const GEMINI_API_BASE_URL = (process.env.GEMINI_API_BASE_URL || 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
 
 const durationLabelMap = {
@@ -408,11 +585,11 @@ resolver.define('setAdminApiKey', async ({ payload }) => {
     
     // Validate the API key with Golpo's credits endpoint
     try {
-      const validateResponse = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
+      const validateResponse = await fetch(`${videoProviderConfig.baseUrl}${videoProviderConfig.endpoints.credits}`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
-          'x-api-key': trimmedApiKey,
+          [videoProviderConfig.auth.headerName]: trimmedApiKey,
         },
       });
       
@@ -420,10 +597,10 @@ resolver.define('setAdminApiKey', async ({ payload }) => {
         throw new Error('Invalid API key. Please check your API key and try again.');
       }
       
-      console.log('[resolver:setAdminApiKey] ✅ Golpo API key validated successfully via /users/credits');
+      console.log(`[resolver:setAdminApiKey] ✅ ${videoProviderConfig.name} API key validated successfully via /users/credits`);
     } catch (validationError) {
-      console.error('[resolver:setAdminApiKey] Golpo API key validation failed:', validationError);
-      throw new Error(validationError?.message || 'Failed to validate Golpo API key. Please check the key and try again.');
+      console.error(`[resolver:setAdminApiKey] ${videoProviderConfig.name} API key validation failed:`, validationError);
+      throw new Error(validationError?.message || `Failed to validate ${videoProviderConfig.name} API key. Please check the key and try again.`);
     }
     
     // Store API key in storage at app level (not user-specific)
@@ -550,11 +727,11 @@ resolver.define('getCredits', async () => {
     // Fetch credits for all API keys in parallel
     const creditsPromises = apiKeyHistory.map(async (keyItem) => {
       try {
-        const creditsResponse = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
+        const creditsResponse = await fetch(`${videoProviderConfig.baseUrl}${videoProviderConfig.endpoints.credits}`, {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
-            'x-api-key': keyItem.apiKey,
+            [videoProviderConfig.auth.headerName]: keyItem.apiKey,
           },
         });
         
@@ -570,47 +747,12 @@ resolver.define('getCredits', async () => {
         }
         
         const creditsData = await creditsResponse.json();
-        
-        // Get stored cumulative usage for this API key
-        const usageStorageKey = 'golpo-api-key-usage';
-        let storedUsage = 0;
-        try {
-          const usageData = await storage.get(usageStorageKey);
-          console.log(`[resolver:getCredits] Looking for usage data. Masked key: ${keyItem.maskedKey}`);
-          console.log(`[resolver:getCredits] Usage data keys:`, usageData ? Object.keys(usageData) : 'null');
-          if (usageData && typeof usageData === 'object') {
-            // Try exact match first
-            if (usageData[keyItem.maskedKey] !== undefined) {
-              storedUsage = Number(usageData[keyItem.maskedKey]) || 0;
-              console.log(`[resolver:getCredits] Found exact match for ${keyItem.maskedKey}: ${storedUsage}`);
-            } else {
-              // Try to find by matching masked key pattern (first 4 and last 4 chars)
-              const keys = Object.keys(usageData);
-              const keyPrefix = keyItem.maskedKey.substring(0, 4);
-              const keySuffix = keyItem.maskedKey.substring(keyItem.maskedKey.length - 4);
-              const matchingKey = keys.find(k => {
-                if (k === keyItem.maskedKey) return true;
-                if (k.length === keyItem.maskedKey.length && k.startsWith(keyPrefix) && k.endsWith(keySuffix)) return true;
-                return false;
-              });
-              if (matchingKey) {
-                storedUsage = Number(usageData[matchingKey]) || 0;
-                console.log(`[resolver:getCredits] Found usage with matching key pattern: ${matchingKey} = ${storedUsage}`);
-              } else {
-                console.warn(`[resolver:getCredits] No matching key found for ${keyItem.maskedKey}`);
-              }
-            }
-          } else {
-            console.warn(`[resolver:getCredits] Usage data is not an object:`, typeof usageData);
-          }
-        } catch (error) {
-          console.warn(`[resolver:getCredits] Error reading stored usage for ${keyItem.maskedKey}:`, error);
-        }
+        const currentCredits = videoProviderConfig.responseMapping.credits(creditsData);
         
         return {
           apiKey: keyItem.maskedKey,
-          creditsUsage: storedUsage, // Use stored cumulative usage instead of API response
-          currentCredits: creditsData.credits || creditsData.current_credits || 0,
+          creditsUsage: 0, // Will be calculated from history in frontend
+          currentCredits: currentCredits,
           addedAt: keyItem.addedAt
         };
       } catch (error) {
@@ -921,24 +1063,8 @@ resolver.define('generateVideo', async ({ payload }) => {
   // This captures the current_credits value before any video generation starts
   let creditsBefore = 0;
   try {
-    const creditsResponseBefore = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': API_KEY,
-      },
-    });
-    
-    if (creditsResponseBefore.ok) {
-      const creditsDataBefore = await creditsResponseBefore.json();
-      // Use current_credits as primary (this is the field that updates after every video generation)
-      creditsBefore = creditsDataBefore.current_credits !== undefined && creditsDataBefore.current_credits !== null
-        ? creditsDataBefore.current_credits
-        : (creditsDataBefore.credits !== undefined && creditsDataBefore.credits !== null
-          ? creditsDataBefore.credits
-          : 0);
-      console.log('[resolver:generateVideo] Credits before generation (current_credits):', creditsBefore);
-    }
+    creditsBefore = await fetchCredits(API_KEY);
+    console.log('[resolver:generateVideo] Credits before generation:', creditsBefore);
   } catch (error) {
     console.warn('[resolver:generateVideo] Failed to fetch credits before generation:', error);
   }
@@ -1172,85 +1298,26 @@ resolver.define('generateVideo', async ({ payload }) => {
 
   console.log('[resolver:generateVideo] requestBody:', JSON.stringify(requestBody, null, 2));
 
-  let response;
-  response = await fetch(`${GOLPO_API_BASE_URL}/api/v1/videos/generate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': API_KEY
-      },
-      body: JSON.stringify(requestBody)
-    });
-
-    if (!response.ok) {
-    let errorBody = 'Unable to read error body';
-    try {
-      errorBody = await response.text();
-    } catch (e) {
-      console.warn('[resolver:generateVideo] Failed to read error body:', e);
-    }
-    
-    let errorMessage = `Golpo AI API error: ${response.status} ${response.statusText}`;
-    
-    // Try to parse error body for more details
-    try {
-      const errorJson = JSON.parse(errorBody);
-      if (errorJson.detail) {
-        errorMessage += `. ${errorJson.detail}`;
-      } else if (errorJson.message) {
-        errorMessage += `. ${errorJson.message}`;
-      } else {
-        errorMessage += `. ${errorBody.substring(0, 500)}`;
-      }
-    } catch (parseError) {
-      errorMessage += `. ${errorBody.substring(0, 500)}`;
-    }
-    
-      console.error('[resolver:generateVideo] Golpo AI API error', {
-        status: response.status,
-        statusText: response.statusText,
-      errorBody: errorBody.substring(0, 500),
-      errorMessage
-    });
-    
-    throw new Error(errorMessage);
-  }
-
-  let data;
+  // Use video service to generate video
+  let videoResult;
   try {
-    data = await response.json();
-  } catch (jsonError) {
-    console.error('[resolver:generateVideo] Failed to parse response JSON:', jsonError);
-    throw new Error('Invalid response format from Golpo AI API');
+    videoResult = await generateVideoService(API_KEY, requestBody);
+    console.log('[resolver:generateVideo] Video generation response received');
+    console.log('[resolver:generateVideo] Video service response:', JSON.stringify(videoResult, null, 2));
+  } catch (error) {
+    console.error('[resolver:generateVideo] Video generation failed:', error);
+    throw error;
   }
-    
-    console.log('[resolver:generateVideo] Step 2: Golpo AI API response received');
-    console.log('[resolver:generateVideo] Golpo AI API response:', JSON.stringify(data, null, 2));
 
-    // Extract jobId and pageId from response/document
-    const jobId = data?.job_id || data?.jobId || data?.id || data?.data?.job_id || data?.data?.jobId;
-    const pageId = document?.pageId || document?.metadata?.pageId;
+  const data = videoResult.rawResponse;
+  const jobId = videoResult.jobId;
+  const pageId = document?.pageId || document?.metadata?.pageId;
 
     // Fetch creditsAfter immediately after video generation API call (credits are deducted at this point)
     let creditsAfter = 0;
     try {
-      const creditsResponseAfter = await fetch(`${GOLPO_API_BASE_URL}/api/v1/users/credits`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': API_KEY,
-        },
-      });
-      
-      if (creditsResponseAfter.ok) {
-        const creditsDataAfter = await creditsResponseAfter.json();
-        creditsAfter = creditsDataAfter.current_credits !== undefined && creditsDataAfter.current_credits !== null
-          ? creditsDataAfter.current_credits
-          : (creditsDataAfter.credits !== undefined && creditsDataAfter.credits !== null
-            ? creditsDataAfter.credits
-            : 0);
-        console.log('[resolver:generateVideo] Credits after generation (current_credits):', creditsAfter);
-      }
+      creditsAfter = await fetchCredits(API_KEY);
+      console.log('[resolver:generateVideo] Credits after generation:', creditsAfter);
     } catch (error) {
       console.warn('[resolver:generateVideo] Failed to fetch credits after generation:', error);
     }
@@ -1461,8 +1528,8 @@ resolver.define('generateVideo', async ({ payload }) => {
     };
 
     return {
-      status: response?.status || 200,
-      statusText: response?.statusText || 'OK',
+      status: 200,
+      statusText: 'OK',
       body: responseBody
     };
   } catch (error) {
@@ -1480,151 +1547,154 @@ resolver.define('generateVideo', async ({ payload }) => {
 // Poll Golpo AI for video generation status by job id
 resolver.define('getVideoStatus', async ({ payload }) => {
   try {
-  const { jobId } = payload ?? {};
+    const { jobId } = payload ?? {};
 
     if (!jobId || typeof jobId !== 'string') {
-    throw new Error('Job id is required to check video status.');
-  }
+      throw new Error('Job id is required to check video status.');
+    }
 
-  // Stop long-running generations: if a job is older than 1 hour, cancel it (best-effort) and return timeout.
-  // This is the "source of truth" used by the frontend to show the failure popup.
-  const TIMEOUT_MS = 60 * 60 * 1000; // 1 hour
-  const TIMEOUT_LABEL = '1 hour';
+    // Stop long-running generations: if a job is older than 1 hour, cancel it (best-effort) and return timeout.
+    // This is the "source of truth" used by the frontend to show the failure popup.
+    const TIMEOUT_MS = 60 * 60 * 1000; // 1 hour
+    const TIMEOUT_LABEL = '1 hour';
 
-  // Best-effort: cancel provider job
-  const cancelProviderJob = async (apiKey, id) => {
-    if (!apiKey) return false;
+    // Best-effort: cancel provider job
+    const cancelProviderJob = async (apiKey, id) => {
+      if (!apiKey) return false;
+      return await cancelVideo(apiKey, id);
+    };
+    
+    // Legacy cancel logic (kept for reference, now uses cancelVideo service)
+    const cancelProviderJobLegacy = async (apiKey, id) => {
+      if (!apiKey) return false;
 
-    const tryUrls = [
-      `${GOLPO_API_BASE_URL}/api/v1/videos/${id}`,
-      `${GOLPO_API_BASE_URL}/api/v1/videos/cancel`,
-      `${GOLPO_API_BASE_URL}/api/v1/videos/${id}/cancel`
-    ];
+      const tryUrls = [
+        `${videoProviderConfig.baseUrl}/api/v1/videos/${id}`,
+        `${videoProviderConfig.baseUrl}${videoProviderConfig.endpoints.cancel}`,
+        `${videoProviderConfig.baseUrl}/api/v1/videos/${id}/cancel`
+      ];
 
-    for (const url of tryUrls) {
-      try {
-        let resp;
-        if (url.endsWith(`/${id}`)) {
-          resp = await fetchWithTimeout(url, {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey }
-          }, 20000);
-        } else {
-          resp = await fetchWithTimeout(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-            body: JSON.stringify({ job_id: id })
-          }, 20000);
+      for (const url of tryUrls) {
+        try {
+          let resp;
+          if (url.endsWith(`/${id}`)) {
+            resp = await fetchWithTimeout(url, {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey }
+            }, 20000);
+          } else {
+            resp = await fetchWithTimeout(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+              body: JSON.stringify({ job_id: id })
+            }, 20000);
+          }
+
+          if (resp && (resp.ok || resp.status === 202 || resp.status === 204)) {
+            console.log('[resolver:getVideoStatus] Provider cancel success for job:', id, 'via', url);
+            return true;
+          }
+        } catch (e) {
+          // continue
         }
+      }
+      return false;
+    };
 
-        if (resp && (resp.ok || resp.status === 202 || resp.status === 204)) {
-          console.log('[resolver:getVideoStatus] Provider cancel success for job:', id, 'via', url);
-          return true;
+    const buildTimeoutResponse = () => ({
+      status: 200,
+      statusText: 'OK',
+      body: {
+        status: 'timeout',
+        job_status: 'timeout',
+        state: 'timeout',
+        message: `Video generation took longer than ${TIMEOUT_LABEL} and was stopped. Please regenerate.`,
+        error: 'Video generation timeout'
+      }
+    });
+
+    try {
+      const jobKey = `video-job-${jobId}`;
+      const jobData = await storage.get(jobKey);
+
+      if (jobData && jobData.createdAt) {
+        const createdAt = new Date(jobData.createdAt).getTime();
+        const elapsedMs = Date.now() - createdAt;
+
+        if (Number.isFinite(elapsedMs) && elapsedMs >= TIMEOUT_MS) {
+          console.log('[resolver:getVideoStatus] Job timed out, stopping generation:', { jobId, elapsedMs, timeoutMs: TIMEOUT_MS });
+
+          // Get API key for cancellation attempt
+          let apiKey = null;
+          try {
+            apiKey = await getUserApiKeyInternal();
+          } catch (e) {}
+
+          // Best-effort cancel at provider
+          try {
+            await cancelProviderJob(apiKey, jobId);
+          } catch (e) {}
+
+          // Remove job from active list & storage so background polling stops
+          try {
+            const activeJobsKey = 'active-video-jobs';
+            const activeJobs = await storage.get(activeJobsKey) || [];
+            const updatedJobs = activeJobs.filter(id => id !== jobId);
+            await storage.set(activeJobsKey, updatedJobs);
+          } catch (e) {}
+
+          try {
+            await storage.delete(jobKey);
+          } catch (e) {}
+
+          return buildTimeoutResponse();
         }
-      } catch (e) {
-        // continue
       }
+    } catch (e) {
+      // If timeout check fails, fall back to provider status below.
     }
-    return false;
-  };
 
-  const buildTimeoutResponse = () => ({
-    status: 200,
-    statusText: 'OK',
-    body: {
-      status: 'timeout',
-      job_status: 'timeout',
-      state: 'timeout',
-      message: `Video generation took longer than ${TIMEOUT_LABEL} and was stopped. Please regenerate.`,
-      error: 'Video generation timeout'
+    // Get admin API key (configured in global page)
+    const API_KEY = await getUserApiKeyInternal();
+
+    if (!API_KEY) {
+      throw new Error(`${videoProviderConfig.name} API key is not configured. Please contact your administrator to configure the API key in the Global Page Settings.`);
     }
-  });
 
-  try {
-    const jobKey = `video-job-${jobId}`;
-    const jobData = await storage.get(jobKey);
+    const statusUrl = `${videoProviderConfig.baseUrl}${videoProviderConfig.endpoints.status}/${jobId}`;
+    console.log('[resolver:getVideoStatus] Checking status for job', jobId, 'using', statusUrl);
 
-    if (jobData && jobData.createdAt) {
-      const createdAt = new Date(jobData.createdAt).getTime();
-      const elapsedMs = Date.now() - createdAt;
-
-      if (Number.isFinite(elapsedMs) && elapsedMs >= TIMEOUT_MS) {
-        console.log('[resolver:getVideoStatus] Job timed out, stopping generation:', { jobId, elapsedMs, timeoutMs: TIMEOUT_MS });
-
-        // Get API key for cancellation attempt
-        let apiKey = null;
-        try {
-          apiKey = await getUserApiKeyInternal();
-        } catch (e) {}
-
-        // Best-effort cancel at provider
-        try {
-          await cancelProviderJob(apiKey, jobId);
-        } catch (e) {}
-
-        // Remove job from active list & storage so background polling stops
-        try {
-          const activeJobsKey = 'active-video-jobs';
-          const activeJobs = await storage.get(activeJobsKey) || [];
-          const updatedJobs = activeJobs.filter(id => id !== jobId);
-          await storage.set(activeJobsKey, updatedJobs);
-        } catch (e) {}
-
-        try {
-          await storage.delete(jobKey);
-        } catch (e) {}
-
-        return buildTimeoutResponse();
-      }
-    }
-  } catch (e) {
-    // If timeout check fails, fall back to provider status below.
-  }
-
-  // Get admin API key (configured in global page)
-  const API_KEY = await getUserApiKeyInternal();
-
-  if (!API_KEY) {
-    throw new Error('Golpo API key is not configured. Please contact your administrator to configure the API key in the Global Page Settings.');
-  }
-
-  const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
-  console.log('[resolver:getVideoStatus] Checking status for job', jobId, 'using', statusUrl);
-
-  try {
     const response = await fetch(statusUrl, {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': API_KEY
+        [videoProviderConfig.auth.headerName]: API_KEY
       }
     });
 
     if (!response.ok) {
       const errorBody = await response.text();
-      console.error('[resolver:getVideoStatus] Golpo AI status error', {
+      console.error(`[resolver:getVideoStatus] ${videoProviderConfig.name} status error`, {
         status: response.status,
         statusText: response.statusText,
         errorBody
       });
-      throw new Error(`Golpo AI status error: ${response.status} ${response.statusText}. ${errorBody}`);
+      throw new Error(`${videoProviderConfig.name} status error: ${response.status} ${response.statusText}. ${errorBody}`);
     }
 
     const data = await response.json();
     console.log('[resolver:getVideoStatus] Status response:', JSON.stringify(data, null, 2));
+    
+    const videoStatus = videoProviderConfig.responseMapping.status(data);
 
     // Credits tracking is now done immediately after video generation starts in generateVideo resolver
     // Credits are deducted when the video generation API call is made, so we track usage right after that
 
     return {
-      status: response.status,
-      statusText: response.statusText,
+      status: 200,
+      statusText: 'OK',
       body: data
     };
-    } catch (innerError) {
-      console.error('[resolver:getVideoStatus] Error calling Golpo AI status API:', innerError);
-      throw innerError;
-    }
   } catch (error) {
     console.error('[resolver:getVideoStatus] Error:', error);
     const errorMessage = error?.message || 'Unknown error occurred';
@@ -1674,11 +1744,11 @@ resolver.define('cancelVideoJob', async ({ payload, context }) => {
 
     if (API_KEY) {
       // Try a few plausible provider endpoints for cancellation (best-effort)
-      const tryUrls = [
-        `${GOLPO_API_BASE_URL}/api/v1/videos/${jobId}`,
-        `${GOLPO_API_BASE_URL}/api/v1/videos/cancel`,
-        `${GOLPO_API_BASE_URL}/api/v1/videos/${jobId}/cancel`
-      ];
+        const tryUrls = [
+          `${videoProviderConfig.baseUrl}/api/v1/videos/${jobId}`,
+          `${videoProviderConfig.baseUrl}${videoProviderConfig.endpoints.cancel}`,
+          `${videoProviderConfig.baseUrl}/api/v1/videos/${jobId}/cancel`
+        ];
 
       for (const url of tryUrls) {
         try {
@@ -1689,7 +1759,7 @@ resolver.define('cancelVideoJob', async ({ payload, context }) => {
               method: 'DELETE',
               headers: {
                 'Content-Type': 'application/json',
-                'x-api-key': API_KEY
+                [videoProviderConfig.auth.headerName]: API_KEY
               }
             }, 20000);
           } else {
@@ -1697,7 +1767,7 @@ resolver.define('cancelVideoJob', async ({ payload, context }) => {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                'x-api-key': API_KEY
+                [videoProviderConfig.auth.headerName]: API_KEY
               },
               body: JSON.stringify({ job_id: jobId })
             }, 20000);
@@ -2718,7 +2788,7 @@ resolver.define('pollVideoStatusBackground', async () => {
     }
     
     if (!API_KEY) {
-      console.error('[pollVideoStatusBackground] Golpo API key not configured');
+      console.error(`[pollVideoStatusBackground] ${videoProviderConfig.name} API key not configured`);
       return { error: 'API key not configured', processed: 0 };
     }
     
@@ -2817,12 +2887,12 @@ resolver.define('pollVideoStatusBackground', async () => {
         }
 
         // Check video status
-        const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
+        const statusUrl = `${videoProviderConfig.baseUrl}${videoProviderConfig.endpoints.status}/${jobId}`;
         const response = await fetch(statusUrl, {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
-            'x-api-key': API_KEY
+            [videoProviderConfig.auth.headerName]: API_KEY
           }
         });
 
@@ -2965,7 +3035,7 @@ const pollVideoStatusBackgroundDirect = async () => {
     }
     
     if (!API_KEY) {
-      console.error('[pollVideoStatusBackground] Golpo API key not configured');
+      console.error(`[pollVideoStatusBackground] ${videoProviderConfig.name} API key not configured`);
       return { error: 'API key not configured', processed: 0 };
     }
     
@@ -3020,12 +3090,12 @@ const pollVideoStatusBackgroundDirect = async () => {
         }
 
         // Check video status
-        const statusUrl = `${GOLPO_API_BASE_URL}/api/v1/videos/status/${jobId}`;
+        const statusUrl = `${videoProviderConfig.baseUrl}${videoProviderConfig.endpoints.status}/${jobId}`;
         const response = await fetch(statusUrl, {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
-            'x-api-key': API_KEY
+            [videoProviderConfig.auth.headerName]: API_KEY
           }
         });
 
